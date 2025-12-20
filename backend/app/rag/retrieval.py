@@ -1,0 +1,91 @@
+from typing import List, Literal
+from pydantic import BaseModel
+from openai import AsyncOpenAI  # Use Async for latency
+import anthropic
+from .config import OPENAI_API_KEY, ANTHROPIC_API_KEY, CHROMA_DB_DIR
+from .ingest import get_or_create_collection
+
+# Added QueryRequest since it was missing in your snippet
+class QueryRequest(BaseModel):
+    question: str
+    model: Literal["gpt4o", "claude"] = "gpt4o"
+
+class RetrievedChunk(BaseModel):
+    text: str
+    source: str
+    score: float
+
+class RAGResponse(BaseModel):
+    answer: str
+    model: str
+    chunks: List[RetrievedChunk]
+
+async def retrieve_chunks(query: str, k: int = 4) -> List[RetrievedChunk]:
+    collection = get_or_create_collection()
+    # Note: Chroma query is sync, but fast. Wrap in run_in_executor for heavy load.
+    results = collection.query(query_texts=[query], n_results=k)
+    
+    chunks = []
+    for doc_id, doc, meta, dist in zip(results["ids"][0], results["documents"][0], results["metadatas"][0], results["distances"][0]):
+        chunks.append(RetrievedChunk(text=doc, source=meta.get("source", doc_id), score=float(dist)))
+    return chunks
+
+async def answer_with_openai(prompt: str) -> str:
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+    )
+    return response.choices[0].message.content or ""
+
+async def answer_with_claude(prompt: str) -> str:
+    # Use AsyncAnthropic and the correct Haiku 4.5 model for lowest latency
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    resp = await client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=2000,
+        temperature=0.1,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return "".join(block.text for block in resp.content if block.type == "text")
+
+def build_prompt(query: str, chunks: List[RetrievedChunk]) -> str:
+    # Format chunks with clear ID and Source labels
+    context_entries = []
+    for i, c in enumerate(chunks):
+        context_entries.append(f"<document id='{i+1}'>\nSource: {c.source}\nContent: {c.text}\n</document>")
+    context_str = "\n".join(context_entries)
+
+    return f"""
+You are a highly precise Research Assistant. Your goal is to answer questions using ONLY the provided context.
+
+### INSTRUCTIONS:
+1. **Grounding:** Base your entire response solely on the information inside the <context> tags.
+2. **Strict Refusal:** If the context does NOT contain the answer, state: "I am sorry, but the provided documents do not contain information to answer this question." Do NOT use your own knowledge.
+3. **Citations:** Every factual claim must be followed by a citation in brackets, e.g., [1] or [1, 3].
+4. **Irrelevance Filter:** Ignore any information in the context that is not directly related to the question.
+5. **No Hallucination:** Do not infer details or "read between the lines" if the data is missing.
+
+<context>
+{context_str}
+</context>
+
+<question>
+{query}
+</question>
+
+Answer:"""
+    
+async def rag_answer(query: str, model: Literal["gpt4o", "claude"] = "gpt4o") -> RAGResponse:
+    chunks = await retrieve_chunks(query)
+    prompt = build_prompt(query, chunks)
+
+    if model == "claude":
+        answer = await answer_with_claude(prompt)
+        model_name = "claude-haiku-4.5"
+    else:
+        answer = await answer_with_openai(prompt)
+        model_name = "gpt-4o-mini"
+
+    return RAGResponse(answer=answer, model=model_name, chunks=chunks)
