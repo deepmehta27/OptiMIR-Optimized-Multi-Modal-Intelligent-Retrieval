@@ -3,7 +3,11 @@ uvicorn
 python-multipart
 pydantic
 chromadb
+openai
 langchain
+langchain-community
+langchain-openai
+langchain-text-splitters
 pymupdf
 python-dotenv
 requests
