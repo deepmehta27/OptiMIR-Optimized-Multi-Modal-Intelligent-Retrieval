@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .rag.ingest import ingest_pdf_bytes
+from .rag.retrieval import rag_answer, RAGResponse, QueryRequest
 
 app = FastAPI(title="OptiMIR Backend", version="0.1.0")
 
@@ -38,3 +39,12 @@ async def ingest(file: UploadFile = File(...)):
         "pages_ingested": result["pages"],
         "chunks_created": result["chunks"],
     }
+    
+@app.post("/query", response_model=RAGResponse)
+async def query_rag(payload: QueryRequest):
+    if not payload.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    # FIX: Must await rag_answer
+    response = await rag_answer(payload.question, model=payload.model)
+    return response
