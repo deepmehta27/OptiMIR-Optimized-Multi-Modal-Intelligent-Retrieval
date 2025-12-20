@@ -1,7 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from .rag.ingest import ingest_pdf_bytes
 
 app = FastAPI(title="OptiMIR Backend", version="0.1.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # will tighten later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def read_root():
@@ -11,3 +20,21 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+@app.post("/ingest")
+async def ingest(file: UploadFile = File(...)):
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    file_bytes = await file.read()
+    
+    # FIX: add 'await' here because ingest_pdf_bytes is async
+    result = await ingest_pdf_bytes(file_bytes, filename=file.filename)
+
+    # Now 'result' is the actual dictionary returned by your function
+    return {
+        "status": "success",
+        "filename": file.filename,
+        "pages_ingested": result["pages"],
+        "chunks_created": result["chunks"],
+    }
