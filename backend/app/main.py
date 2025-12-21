@@ -1,7 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .rag.ingest import ingest_pdf_bytes
-from .rag.retrieval import rag_answer, RAGResponse, QueryRequest
+from .rag.retrieval import rag_answer, stream_rag_answer,RAGResponse, QueryRequest
 
 app = FastAPI(title="OptiMIR Backend", version="0.1.0")
 
@@ -48,3 +49,22 @@ async def query_rag(payload: QueryRequest):
     # FIX: Must await rag_answer
     response = await rag_answer(payload.question, model=payload.model)
     return response
+
+@app.post("/query/stream")
+async def query_rag_stream(payload: QueryRequest):
+    if not payload.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    # The event_generator simply wraps our retrieval logic
+    async def event_generator():
+        async for chunk in stream_rag_answer(
+            query=payload.question,
+            model=payload.model,
+        ):
+            yield chunk
+
+    # Return with the specific SSE media type
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+    )
