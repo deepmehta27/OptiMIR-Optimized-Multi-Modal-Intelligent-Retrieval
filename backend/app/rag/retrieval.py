@@ -16,6 +16,8 @@ class RetrievedChunk(BaseModel):
     text: str
     source: str
     score: float
+    type: str | None = None
+    page: int | None = None
 
 class RAGResponse(BaseModel):
     answer: str
@@ -36,6 +38,8 @@ async def retrieve_chunks(query: str, k: int = 4) -> List[RetrievedChunk]:
                 text=doc,
                 source=meta.get("source", doc_id),
                 score=float(dist),
+                type=meta.get("type"),
+                page=meta.get("page"),
             )
         )
     return chunks
