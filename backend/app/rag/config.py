@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
+CLAUDE_VISION_MODEL = "claude-sonnet-4-5"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 CHROMA_DB_DIR = os.getenv("CHROMA_DB_DIR", "./chroma_db")
