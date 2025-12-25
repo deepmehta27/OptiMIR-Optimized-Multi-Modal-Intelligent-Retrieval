@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .rag.ingest import ingest_pdf_bytes
-from .rag.retrieval import rag_answer, stream_rag_answer,RAGResponse, QueryRequest
+from .rag.retrieval import rag_answer, stream_rag_answer,RAGResponse, QueryRequest,ChatRequest, stream_chat_answer
 
 app = FastAPI(title="OptiMIR Backend", version="0.1.0")
 
@@ -40,7 +40,19 @@ async def ingest(file: UploadFile = File(...)):
         "pages_ingested": result["pages"],
         "chunks_created": result["chunks"],
     }
-    
+
+@app.post("/chat/stream")
+async def chat_stream(payload: ChatRequest):
+    async def event_gen():
+        async for chunk in stream_chat_answer(
+            query=payload.question,
+            model=payload.model,
+            use_context=payload.use_context,
+        ):
+            yield chunk
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
 @app.post("/query", response_model=RAGResponse)
 async def query_rag(payload: QueryRequest):
     if not payload.question.strip():
