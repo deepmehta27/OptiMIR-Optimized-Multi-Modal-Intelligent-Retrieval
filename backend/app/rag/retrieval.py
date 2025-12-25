@@ -11,7 +11,13 @@ from .ingest import get_or_create_collection
 class QueryRequest(BaseModel):
     question: str
     model: Literal["gpt4o", "claude"] = "gpt4o"
+    use_context: bool = True
 
+class ChatRequest(BaseModel):
+    question: str
+    model: Literal["gpt4o", "claude"] = "gpt4o"
+    use_context: bool = True
+    
 class RetrievedChunk(BaseModel):
     text: str
     source: str
@@ -71,6 +77,48 @@ You are a highly precise Research Assistant. Your goal is to answer questions us
 
 Answer:""".strip()
 
+def build_chat_prompt(
+    query: str,
+    chunks: List[RetrievedChunk] | None,
+    use_context: bool,
+) -> str:
+    if use_context and chunks:
+        context_lines = []
+        for i, c in enumerate(chunks):
+            context_lines.append(
+                f"[Snippet {i+1} | source={c.source} | page={c.page} | type={c.type}]\n"
+                f"{c.text}\n"
+            )
+        context_str = "\n\n".join(context_lines)
+
+        return f"""
+You are a helpful assistant for the OptiMIR document QA system.
+
+You MUST obey these rules:
+- Answer questions about the uploaded documents and closely related topics.
+- You may respond briefly to greetings or simple conversational phrases.
+- If the user asks about unrelated topics (e.g., cooking, recipes, movies, music, politics), you MUST refuse and say that this system is only for the documents in this workspace.
+SNIPPETS:
+{context_str}
+
+USER QUESTION:
+{query}
+
+Answer concisely:""".strip()
+
+    # No context → pure but still narrow chat
+    return f"""
+You are a helpful assistant for the OptiMIR document QA system.
+
+You may answer normal greetings and simple questions, but if the user asks about topics
+completely unrelated to this workspace, politely say that this system is focused on
+the uploaded documents and light conversation around them.
+
+USER QUESTION:
+{query}
+
+Answer concisely:""".strip()
+
 # NON-STREAMING LLM CALLS (for /query)
 
 async def answer_with_openai(prompt: str) -> str:
@@ -121,6 +169,125 @@ async def rag_answer(
 
     return RAGResponse(answer=answer, model=model_name, chunks=chunks)
 
+# STREAMING LLM CALLS (for /query/stream)
+
+CHEAP_CHAT_MODEL = "gpt-4.1-nano"  # or "gpt-5-nano"
+
+async def stream_chat_openai(prompt: str) -> AsyncGenerator[str, None]:
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    start_time = time.time()
+
+    stream = await client.chat.completions.create(
+        model=CHEAP_CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=512,
+        temperature=0.5,
+        stream=True,
+    )
+
+    first_token = True
+    async for chunk in stream:
+        token = chunk.choices[0].delta.content or ""
+        if not token:
+            continue
+        if first_token:
+            print(f"--- [TTFT] Chat OpenAI: {time.time() - start_time:.2f}s ---")
+            first_token = False
+        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+
+    print(f"--- [LATENCY] Chat OpenAI Total: {time.time() - start_time:.2f}s ---")
+
+
+async def stream_chat_claude(prompt: str) -> AsyncGenerator[str, None]:
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    start_time = time.time()
+    first_token = True
+
+    async with client.messages.stream(
+        model="claude-haiku-4-5",
+        max_tokens=512,
+        temperature=0.4,
+        messages=[{"role": "user", "content": prompt}],
+    ) as stream:
+        async for event in stream:
+            if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                token = event.delta.text
+                if not token:
+                    continue
+                if first_token:
+                    print(f"--- [TTFT] Chat Claude: {time.time() - start_time:.2f}s ---")
+                    first_token = False
+                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+
+    print(f"--- [LATENCY] Chat Claude Total: {time.time() - start_time:.2f}s ---")
+
+async def stream_chat_answer(
+    query: str,
+    model: Literal["gpt4o", "claude"] = "gpt4o",
+    use_context: bool = True,
+) -> AsyncGenerator[str, None]:
+    chunks: List[RetrievedChunk] | None = None
+
+    lower_q = query.lower()
+
+    smalltalk_triggers = ["hi", "hello", "hey", "how are you", "good morning", "good evening"]
+    is_smalltalk = any(f" {t} " in f" {lower_q} " for t in smalltalk_triggers)
+
+    # 1) Hard block obviously irrelevant topics
+    off_scope_triggers = [
+        "recipe", "cook", "cooking", "pasta", "food",
+        "movie", "music", "song", "lyrics",
+        "politics", "election",
+    ]
+    is_off_scope = any(t in lower_q for t in off_scope_triggers)
+
+    if is_off_scope:
+        meta = {
+            "type": "meta",
+            "mode": "chat",
+            "model": "rule-based",
+            "use_context": False,
+            "is_smalltalk": False,
+            "is_off_scope": True,
+            "chunks": [],
+        }
+        yield f"data: {json.dumps(meta)}\n\n"
+        msg = (
+            "I am focused on helping with your uploaded documents and related questions, "
+            "not general topics like recipes or entertainment."
+        )
+        # stream this fixed message as tokens for consistency
+        for tok in msg.split(" "):
+            yield f"data: {json.dumps({'type': 'token', 'token': tok + ' '})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    # 2) Normal behavior: smalltalk vs doc-aware chat
+    if use_context and not is_smalltalk:
+        chunks = await retrieve_chunks(query, k=4)
+
+    prompt = build_chat_prompt(query, chunks, use_context=use_context and not is_smalltalk)
+
+    meta = {
+        "type": "meta",
+        "mode": "chat",
+        "model": "claude-haiku-4.5" if model == "claude" else CHEAP_CHAT_MODEL,
+        "use_context": use_context and not is_smalltalk,
+        "is_smalltalk": is_smalltalk,
+        "is_off_scope": False,
+        "chunks": [c.model_dump() for c in chunks] if chunks else [],
+    }
+    yield f"data: {json.dumps(meta)}\n\n"
+
+    if model == "claude":
+        async for ev in stream_chat_claude(prompt):
+            yield ev
+    else:
+        async for ev in stream_chat_openai(prompt):
+            yield ev
+
+    yield "data: [DONE]\n\n"
+    
 # STREAMING LLM CALLS (for /query/stream)
 
 async def stream_openai(prompt: str) -> AsyncGenerator[str, None]:
