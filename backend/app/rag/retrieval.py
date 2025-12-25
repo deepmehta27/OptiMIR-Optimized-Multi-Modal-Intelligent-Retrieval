@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 import anthropic
 from .config import OPENAI_API_KEY, ANTHROPIC_API_KEY
 from .ingest import get_or_create_collection
+from .ingest import get_or_create_collection, list_uploaded_sources
 
 # --- Schemas ---
 class QueryRequest(BaseModel):
@@ -108,11 +109,14 @@ You are OptiMIR - Optimized Multi‑Modal Intelligent Retrieval, a highly precis
 4. **Conversational Tone:** Respond naturally and briefly to greetings or light small-talk (e.g., "hi," "how are you").
 
 ### GROUNDING & CITATIONS:
-1. **Source of Truth:** Use the provided SNIPPETS as your sole source of truth for document-based questions.
-2. **Synthesis:** You are encouraged to synthesize, compare, and summarize information across multiple snippets when requested.
-3. **Precision:** Every factual claim derived from the documents must be followed by a citation in brackets referencing the snippet ID, e.g., [1] or [2, 3].
-4. **No Hallucination:** If the snippets do not contain the answer, state that the provided documents do not contain that information.
-
+1. Grounding: Base your entire response solely on the information inside the snippets below.
+2. Strict Refusal: If the snippets truly do NOT contain enough information to answer, say:
+   "I am sorry, but the provided documents do not contain information to answer this question."
+   Do NOT use outside knowledge.
+3. Synthesis: When answering broad or summary-style questions, combine information from ALL
+   relevant snippets to describe the main ideas, even if each snippet is partial.
+4. Irrelevance Filter: Ignore any information that is not directly related to the question.
+5. No Hallucination: Do not invent facts that are not supported by the snippets.
 SNIPPETS:
 {context_str}
 
@@ -276,7 +280,67 @@ async def stream_chat_answer(
             yield f"data: {json.dumps({'type': 'token', 'token': tok + ' '})}\n\n"
         yield "data: [DONE]\n\n"
         return
+    
+    sources = list_uploaded_sources()
+    multiple_docs = len(sources) > 1
 
+    generic_doc_triggers = [
+    "what is this pdf about",
+    "what's the pdf about",
+    "what is the pdf about",
+    "summarize the pdf",
+    "summarize this pdf",
+    "summarize the document",
+    "summarize this document",
+    "summarize for me",
+    "give me a summary",
+    "summary of the pdf",
+    ]
+    is_generic_doc_question = any(t in lower_q for t in generic_doc_triggers)
+
+    if multiple_docs and is_generic_doc_question:
+        meta = {
+            "type": "meta",
+            "mode": "chat",
+            "model": "router",
+            "use_context": False,
+            "is_smalltalk": False,
+            "is_off_scope": False,
+            "needs_disambiguation": True,
+            "options": sources,
+            "chunks": [],
+        }
+        yield f"data: {json.dumps(meta)}\n\n"
+
+        msg = (
+            "You have multiple documents uploaded:\n"
+            + "\n".join(f"- {s}" for s in sources)
+            + "\nPlease tell me which document you want me to use."
+        )
+        for tok in msg.split(" "):
+            yield f"data: {json.dumps({'type': 'token', 'token': tok + ' '})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    
+    summary_triggers = [
+        "summarize the pdf",
+        "summarize this pdf",
+        "summarize this document",
+        "summarize the document",
+        "summarize for me",
+        "give me a summary",
+        "high level summary",
+    ]
+    is_summary = any(t in lower_q for t in summary_triggers)
+
+    if use_context and not is_smalltalk:
+        if is_summary:
+            chunks = await retrieve_chunks(query, k=20)  # or 16/20
+        else:
+            chunks = await retrieve_chunks(query, k=4)
+    else:
+        chunks = []
+    
     # 2) Normal behavior: smalltalk vs doc-aware chat
     if use_context and not is_smalltalk:
         chunks = await retrieve_chunks(query, k=4)
