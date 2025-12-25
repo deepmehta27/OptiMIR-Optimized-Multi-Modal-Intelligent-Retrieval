@@ -8,6 +8,11 @@ from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from .vision_ingest import page_needs_vision, summarize_image_with_vision
 from .config import OPENAI_API_KEY, CHROMA_DB_DIR
 
+UPLOADED_SOURCES: set[str] = set()
+def list_uploaded_sources() -> list[str]:
+    """Return sorted list of distinct source filenames that have been ingested."""
+    return sorted(UPLOADED_SOURCES)
+
 # Used the 'small' model with reduced dimensions for max speed
 embedding_fn = OpenAIEmbeddingFunction(
     api_key=OPENAI_API_KEY,
@@ -129,7 +134,8 @@ async def ingest_pdf_bytes(file_bytes: bytes, filename: str):
                     "chunk_index": idx,
                 }
             )
-
+    UPLOADED_SOURCES.add(filename)
+    
     if not all_documents:
         return {"status": "empty", "pages": len(doc), "chunks": 0}
 
