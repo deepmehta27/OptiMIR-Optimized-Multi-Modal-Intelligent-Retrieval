@@ -1,8 +1,15 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from .rag.ingest import ingest_pdf_bytes
-from .rag.retrieval import rag_answer, stream_rag_answer,RAGResponse, QueryRequest,ChatRequest, stream_chat_answer
+from .rag.ingest import ingest_pdf_bytes, delete_document_by_source, list_uploaded_sources, refresh_uploaded_sources_from_chroma
+from .rag.retrieval import rag_answer, stream_rag_answer,RAGResponse, QueryRequest,ChatRequest, stream_chat_answer, run_ragas_eval
+from pydantic import BaseModel
+
+class DeletePdfRequest(BaseModel):
+    source: str  # the filename used as "source" during ingest
+
+class EvalRequest(BaseModel):
+    limit: int | None = 50  # how many recent traces to score
 
 app = FastAPI(title="OptiMIR Backend", version="0.1.0")
 
@@ -80,3 +87,24 @@ async def query_rag_stream(payload: QueryRequest):
         event_generator(),
         media_type="text/event-stream",
     )
+@app.get("/pdfs")
+async def list_pdfs():
+    return {"sources": list_uploaded_sources()}
+
+@app.post("/delete_pdf")
+async def delete_pdf(req: DeletePdfRequest):
+    if not req.source.strip():
+        raise HTTPException(status_code=400, detail="source cannot be empty")
+
+    result = delete_document_by_source(req.source)
+    return result
+
+@app.post("/evaluate/ragas")
+async def evaluate_ragas(payload: EvalRequest):
+    result = await run_ragas_eval(limit=payload.limit)
+    return result
+
+@app.on_event("startup")
+async def startup_event():
+    # rebuild the in-memory source list from Chroma at startup
+    refresh_uploaded_sources_from_chroma()
