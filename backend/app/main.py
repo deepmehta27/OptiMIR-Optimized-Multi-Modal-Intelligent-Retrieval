@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .rag.ingest import ingest_pdf_bytes, delete_document_by_source, list_uploaded_sources, refresh_uploaded_sources_from_chroma
-from .rag.retrieval import rag_answer, stream_rag_answer,RAGResponse, QueryRequest,ChatRequest, stream_chat_answer, run_ragas_eval
+from .rag.retrieval import rag_answer, RAGResponse, QueryRequest,ChatRequest, stream_chat_answer, run_ragas_eval
 from pydantic import BaseModel
 
 class DeletePdfRequest(BaseModel):
@@ -69,24 +69,6 @@ async def query_rag(payload: QueryRequest):
     response = await rag_answer(payload.question, model=payload.model)
     return response
 
-@app.post("/query/stream")
-async def query_rag_stream(payload: QueryRequest):
-    if not payload.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
-
-    # The event_generator simply wraps our retrieval logic
-    async def event_generator():
-        async for chunk in stream_rag_answer(
-            query=payload.question,
-            model=payload.model,
-        ):
-            yield chunk
-
-    # Return with the specific SSE media type
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-    )
 @app.get("/pdfs")
 async def list_pdfs():
     return {"sources": list_uploaded_sources()}
