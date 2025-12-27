@@ -12,3 +12,7 @@ pymupdf
 python-dotenv
 requests
 anthropic
+asyncpg
+ragas
+datasets
+
