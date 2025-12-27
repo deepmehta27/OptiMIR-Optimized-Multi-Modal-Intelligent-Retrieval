@@ -152,3 +152,40 @@ async def ingest_pdf_bytes(file_bytes: bytes, filename: str):
     )
 
     return {"pages": len(doc), "chunks": len(all_documents)}
+
+def delete_document_by_source(filename: str) -> dict:
+    collection = get_or_create_collection()
+    # delete by where clause on metadata
+    collection.delete(where={"source": filename})
+    # also drop from the in-memory registry if you're using it
+    try:
+        UPLOADED_SOURCES.remove(filename)
+    except KeyError:
+        pass
+    return {"status": "ok", "deleted_source": filename}
+
+def refresh_uploaded_sources_from_chroma():
+    """
+    Scan the persistent Chroma collection and rebuild UPLOADED_SOURCES
+    from distinct 'source' metadata values.
+    """
+    global UPLOADED_SOURCES
+    collection = get_or_create_collection()
+
+    results = collection.get(include=["metadatas"])
+    raw_metadatas = results.get("metadatas", [])
+
+    sources: set[str] = set()
+
+    for meta in raw_metadatas:
+        # meta can be a dict or a string, depending on how Chroma stored it
+        if isinstance(meta, dict):
+            src = meta.get("source")
+            if src:
+                sources.add(src)
+        elif isinstance(meta, str):
+            # older entries might just store the filename as a string
+            sources.add(meta)
+
+    UPLOADED_SOURCES = sources
+
