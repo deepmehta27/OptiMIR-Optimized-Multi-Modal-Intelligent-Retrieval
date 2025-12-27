@@ -2,11 +2,17 @@ import json
 import time
 from typing import List, Literal, AsyncGenerator
 from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 import anthropic
 from .config import OPENAI_API_KEY, ANTHROPIC_API_KEY
 from .ingest import get_or_create_collection
 from .ingest import get_or_create_collection, list_uploaded_sources
+from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import Faithfulness
+
+RAG_LOG: list[dict] = []
 
 # --- Schemas ---
 class QueryRequest(BaseModel):
@@ -31,6 +37,16 @@ class RAGResponse(BaseModel):
     model: str
     chunks: List[RetrievedChunk]
 
+class ChatHistoryItem(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+
+class ChatRequest(BaseModel):
+    question: str
+    model: Literal["gpt4o", "claude"] = "gpt4o"
+    use_context: bool = True
+    history: list[ChatHistoryItem] | None = None
+    
 # Retrieval + Prompt
 
 async def retrieve_chunks(query: str, k: int = 4) -> List[RetrievedChunk]:
@@ -59,7 +75,7 @@ def build_prompt(query: str, chunks: List[RetrievedChunk]) -> str:
     context_str = "\n".join(context_entries)
 
     return f"""
-You are a highly precise Research Assistant. Your goal is to answer questions using ONLY the provided context.
+You are OptiMIR - Optimized Multi‑Modal Intelligent Retrieval, a highly precise document QA assistant designed to help users explore and understand their workspace documents.
 
 Additional rules for mathematics:
 - Write formulas cleanly using either plain text (e.g., "Var = E[X^2] - (E[X])^2")
@@ -85,11 +101,30 @@ Additional rules for mathematics:
 
 Answer:""".strip()
 
+async def stream_chat_chat_endpoint(req: ChatRequest):
+    return StreamingResponse(
+        stream_chat_answer(
+            query=req.question,
+            model=req.model,
+            use_context=req.use_context,
+            history=req.history or [],
+        ),
+        media_type="text/event-stream",
+    )
+
 def build_chat_prompt(
     query: str,
     chunks: List[RetrievedChunk] | None,
     use_context: bool,
+    history: list[ChatHistoryItem],
 ) -> str:
+    history_str = ""
+    if history:
+        lines = []
+        for h in history:
+            prefix = "User:" if h.role == "user" else "Assistant:"
+            lines.append(f"{prefix} {h.text}")
+        history_str = "\n\nPrevious conversation:\n" + "\n".join(lines)
     if use_context and chunks:
         context_lines = []
         for i, c in enumerate(chunks):
@@ -103,10 +138,13 @@ def build_chat_prompt(
 You are OptiMIR - Optimized Multi‑Modal Intelligent Retrieval, a highly precise document QA assistant designed to help users explore and understand their workspace documents.
 
 ### CORE RULES:
-1. **Identity:** If asked "who are you," identify as OptiMIR. Do not claim to be the author of the documents or the user.
-2. **Scope:** Only answer questions about the uploaded documents or closely related professional topics. 
-3. **Strict Refusal:** Politely refuse questions about unrelated topics (e.g., cooking, movies, music, or politics). State that the system is focused solely on the documents in this workspace.
-4. **Conversational Tone:** Respond naturally and briefly to greetings or light small-talk (e.g., "hi," "how are you").
+1. Identity: If asked "who are you," identify as OptiMIR. Do not claim to be the author of the documents or the user.
+2. Scope: Only answer questions about the uploaded documents or closely related professional topics. 
+3. Strict Refusal: Politely refuse questions about unrelated topics (e.g., cooking, movies, music, or politics). State that the system is focused solely on the documents in this workspace.
+4. Conversational Tone: Respond naturally and briefly to greetings or light small-talk (e.g., "hi," "how are you").
+5. Follow-ups: Use the previous conversation to resolve pronouns like "this", "that", or "it". If the user says "tell me more about that", continue the topic from the last assistant answer, do not switch to a different document.
+
+{history_str}
 
 ### GROUNDING & CITATIONS:
 1. Grounding: Base your entire response solely on the information inside the snippets below.
@@ -117,6 +155,7 @@ You are OptiMIR - Optimized Multi‑Modal Intelligent Retrieval, a highly precis
    relevant snippets to describe the main ideas, even if each snippet is partial.
 4. Irrelevance Filter: Ignore any information that is not directly related to the question.
 5. No Hallucination: Do not invent facts that are not supported by the snippets.
+
 SNIPPETS:
 {context_str}
 
@@ -127,7 +166,9 @@ Answer concisely:""".strip()
 
     # No context → pure but still narrow chat
     return f"""
-You are a helpful assistant for the OptiMIR document QA system.
+You are OptiMIR - Optimized Multi‑Modal Intelligent Retrieval, a highly precise document QA assistant designed to help users explore and understand their workspace documents.
+
+{history_str}
 
 You may answer normal greetings and simple questions, but if the user asks about topics
 completely unrelated to this workspace, politely say that this system is focused on
@@ -185,8 +226,40 @@ async def rag_answer(
         model_name = "gpt-4o-mini"
 
     print(f"--- [LOG] Answer generated by: {model_name} ---\n")
+    # minimal Ragas trace
+    RAG_LOG.append(
+        {
+            "question": query,
+            "answer": answer,
+            "contexts": [c.text for c in chunks],
+        }
+    )
 
     return RAGResponse(answer=answer, model=model_name, chunks=chunks)
+
+async def run_ragas_eval(limit: int | None = 50) -> dict:
+    samples = RAG_LOG[-limit:] if (limit and len(RAG_LOG) > limit) else RAG_LOG
+    if not samples:
+        return {"status": "empty", "count": 0}
+
+    data = {
+        "question": [s["question"] for s in samples],
+        "answer": [s["answer"] for s in samples],
+        "contexts": [s["contexts"] for s in samples],
+    }
+    ds = Dataset.from_dict(data)
+
+    result = evaluate(ds, metrics=[Faithfulness()])
+    scores_list = result.scores  # e.g. [0.83]
+    faithfulness_score = scores_list[0] if scores_list else None
+
+    return {
+        "status": "ok",
+        "count": len(samples),
+        "scores": {
+            "faithfulness": faithfulness_score,
+        },
+    }
 
 # STREAMING LLM CALLS (for /query/stream)
 
@@ -244,7 +317,10 @@ async def stream_chat_answer(
     query: str,
     model: Literal["gpt4o", "claude"] = "gpt4o",
     use_context: bool = True,
+    history: list[ChatHistoryItem] | None = None,
 ) -> AsyncGenerator[str, None]:
+    if history is None:
+        history = []
     chunks: List[RetrievedChunk] | None = None
 
     lower_q = query.lower()
@@ -252,7 +328,6 @@ async def stream_chat_answer(
     smalltalk_triggers = ["hi", "hello", "hey", "how are you", "good morning", "good evening"]
     is_smalltalk = any(f" {t} " in f" {lower_q} " for t in smalltalk_triggers)
 
-    # 1) Hard block obviously irrelevant topics
     off_scope_triggers = [
         "recipe", "cook", "cooking", "pasta", "food",
         "movie", "music", "song", "lyrics",
@@ -260,6 +335,7 @@ async def stream_chat_answer(
     ]
     is_off_scope = any(t in lower_q for t in off_scope_triggers)
 
+    # ----- 0) Hard block off-scope -----
     if is_off_scope:
         meta = {
             "type": "meta",
@@ -275,26 +351,26 @@ async def stream_chat_answer(
             "I am focused on helping with your uploaded documents and related questions, "
             "not general topics like recipes or entertainment."
         )
-        # stream this fixed message as tokens for consistency
         for tok in msg.split(" "):
             yield f"data: {json.dumps({'type': 'token', 'token': tok + ' '})}\n\n"
         yield "data: [DONE]\n\n"
         return
-    
+
+    # ----- 1) Multi-doc disambiguation -----
     sources = list_uploaded_sources()
     multiple_docs = len(sources) > 1
 
     generic_doc_triggers = [
-    "what is this pdf about",
-    "what's the pdf about",
-    "what is the pdf about",
-    "summarize the pdf",
-    "summarize this pdf",
-    "summarize the document",
-    "summarize this document",
-    "summarize for me",
-    "give me a summary",
-    "summary of the pdf",
+        "what is this pdf about",
+        "what's the pdf about",
+        "what is the pdf about",
+        "summarize the pdf",
+        "summarize this pdf",
+        "summarize the document",
+        "summarize this document",
+        "summarize for me",
+        "give me a summary",
+        "summary of the pdf",
     ]
     is_generic_doc_question = any(t in lower_q for t in generic_doc_triggers)
 
@@ -321,7 +397,8 @@ async def stream_chat_answer(
             yield f"data: {json.dumps({'type': 'token', 'token': tok + ' '})}\n\n"
         yield "data: [DONE]\n\n"
         return
-    
+
+    # ----- 2) Retrieval logic (same spirit as query/stream) -----
     summary_triggers = [
         "summarize the pdf",
         "summarize this pdf",
@@ -335,18 +412,14 @@ async def stream_chat_answer(
 
     if use_context and not is_smalltalk:
         if is_summary:
-            chunks = await retrieve_chunks(query, k=20)  # or 16/20
+            chunks = await retrieve_chunks(query, k=20)
         else:
-            chunks = await retrieve_chunks(query, k=4)
+            chunks = await retrieve_chunks(query, k=12)
     else:
         chunks = []
-    
-    # 2) Normal behavior: smalltalk vs doc-aware chat
-    if use_context and not is_smalltalk:
-        chunks = await retrieve_chunks(query, k=4)
 
-    prompt = build_chat_prompt(query, chunks, use_context=use_context and not is_smalltalk)
-
+    # ----- 3) Build prompt + send meta with chunks -----
+    prompt = build_chat_prompt(query, chunks, use_context=use_context, history=history)
     meta = {
         "type": "meta",
         "mode": "chat",
@@ -358,12 +431,37 @@ async def stream_chat_answer(
     }
     yield f"data: {json.dumps(meta)}\n\n"
 
+    # ----- 4) Stream tokens AND buffer answer for RAGAS -----
+    answer_text = ""
+
     if model == "claude":
         async for ev in stream_chat_claude(prompt):
+            try:
+                payload = json.loads(ev.replace("data:", "").strip())
+                if payload.get("type") == "token":
+                    answer_text += payload.get("token", "")
+            except Exception:
+                pass
             yield ev
     else:
         async for ev in stream_chat_openai(prompt):
+            try:
+                payload = json.loads(ev.replace("data:", "").strip())
+                if payload.get("type") == "token":
+                    answer_text += payload.get("token", "")
+            except Exception:
+                pass
             yield ev
+
+    # ----- 5) Log for RAGAS (single unified stream) -----
+    if chunks:
+        RAG_LOG.append(
+            {
+                "question": query,
+                "answer": answer_text,
+                "contexts": [c.text for c in chunks],
+            }
+        )
 
     yield "data: [DONE]\n\n"
     
@@ -443,6 +541,9 @@ async def stream_rag_answer(
     chunks = await retrieve_chunks(query)
     prompt = build_prompt(query, chunks)
 
+    # buffer answer tokens as we stream
+    answer_text = ""
+
     # 1) Send metadata event first (model + chunks)
     meta = {
         "type": "meta",
@@ -454,10 +555,32 @@ async def stream_rag_answer(
     # 2) Stream tokens
     if model == "claude":
         async for event in stream_claude(prompt):
+            # event is already like 'data: {...}\n\n'
+            try:
+                payload = json.loads(event.replace("data:", "").strip())
+                if payload.get("type") == "token":
+                    answer_text += payload.get("token", "")
+            except Exception:
+                pass
             yield event
     else:
         async for event in stream_openai(prompt):
+            try:
+                payload = json.loads(event.replace("data:", "").strip())
+                if payload.get("type") == "token":
+                    answer_text += payload.get("token", "")
+            except Exception:
+                pass
             yield event
 
-    # 3) Final done marker
+    # 3) Log this run for Ragas
+    RAG_LOG.append(
+        {
+            "question": query,
+            "answer": answer_text,
+            "contexts": [c.text for c in chunks],
+        }
+    )
+
+    # 4) Final done marker
     yield "data: [DONE]\n\n"
