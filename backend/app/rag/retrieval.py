@@ -1,6 +1,7 @@
 import json
 import time
 from typing import List, Literal, AsyncGenerator
+from functools import partial
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
@@ -11,6 +12,7 @@ from .ingest import get_or_create_collection, list_uploaded_sources
 from datasets import Dataset
 from ragas import evaluate
 from ragas.metrics import Faithfulness
+import asyncio
 
 RAG_LOG: list[dict] = []
 
@@ -247,11 +249,16 @@ async def run_ragas_eval(limit: int | None = 50) -> dict:
         "answer": [s["answer"] for s in samples],
         "contexts": [s["contexts"] for s in samples],
     }
+
     ds = Dataset.from_dict(data)
 
-    result = evaluate(ds, metrics=[Faithfulness()])
-    scores_list = result.scores  # e.g. [0.83]
-    faithfulness_score = scores_list[0] if scores_list else None
+    # IMPORTANT: run RAGAS in a separate thread
+    loop = asyncio.get_running_loop()
+    eval_fn = partial(evaluate, ds, metrics=[Faithfulness()])
+    result = await loop.run_in_executor(None, eval_fn)
+
+    scores = result.scores or []
+    faithfulness_score = scores[0] if scores else None
 
     return {
         "status": "ok",
