@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from .rag.ingest import ingest_pdf_bytes, delete_document_by_source, list_uploaded_sources, refresh_uploaded_sources_from_chroma
+from .rag.ingest import ingest_pdf_bytes, delete_document_by_source, list_uploaded_sources, refresh_uploaded_sources_from_chroma, get_or_create_collection
 from .rag.retrieval import rag_answer, RAGResponse, QueryRequest,ChatRequest, stream_chat_answer, run_ragas_eval
 from pydantic import BaseModel
+from .rag.image_ingest import process_financial_image
+from .rag.image_routes import router as image_router
 
 class DeletePdfRequest(BaseModel):
     source: str  # the filename used as "source" during ingest
@@ -20,6 +22,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(image_router)
 
 @app.get("/")
 def read_root():
@@ -40,6 +45,12 @@ async def ingest(file: UploadFile = File(...)):
     # FIX: add 'await' here because ingest_pdf_bytes is async
     result = await ingest_pdf_bytes(file_bytes, filename=file.filename)
 
+    if result.get("status") == "rejected":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only financial documents are supported. Reason: {result.get('reason')}",
+        )
+
     # Now 'result' is the actual dictionary returned by your function
     return {
         "status": "success",
@@ -47,7 +58,7 @@ async def ingest(file: UploadFile = File(...)):
         "pages_ingested": result["pages"],
         "chunks_created": result["chunks"],
     }
-
+    
 @app.post("/chat/stream")
 async def chat_stream(payload: ChatRequest):
     async def event_gen():
