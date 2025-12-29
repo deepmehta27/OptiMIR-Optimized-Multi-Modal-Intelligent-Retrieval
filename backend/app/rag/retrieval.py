@@ -9,24 +9,14 @@ import anthropic
 from .config import OPENAI_API_KEY, ANTHROPIC_API_KEY
 from .ingest import get_or_create_collection
 from .ingest import get_or_create_collection, list_uploaded_sources
-from datasets import Dataset
-from ragas import evaluate
-from ragas.metrics import Faithfulness
-import asyncio
-
-RAG_LOG: list[dict] = []
+from .ragas_eval import log_rag_interaction
 
 # --- Schemas ---
 class QueryRequest(BaseModel):
     question: str
-    model: Literal["gpt4o", "claude"] = "gpt4o"
+    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"  # ✅ FIXED
     use_context: bool = True
 
-class ChatRequest(BaseModel):
-    question: str
-    model: Literal["gpt4o", "claude"] = "gpt4o"
-    use_context: bool = True
-    
 class RetrievedChunk(BaseModel):
     text: str
     source: str
@@ -45,7 +35,7 @@ class ChatHistoryItem(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
-    model: Literal["gpt4o", "claude"] = "gpt4o"
+    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"
     use_context: bool = True
     history: list[ChatHistoryItem] | None = None
     
@@ -67,6 +57,52 @@ async def retrieve_chunks(query: str, k: int = 4) -> List[RetrievedChunk]:
                 page=meta.get("page"),
             )
         )
+    return chunks
+
+async def retrieve_chunks(
+    query: str, 
+    k: int = 4,
+    filter_images_only: bool = False  # ✅ NEW: Filter for standalone images
+) -> List[RetrievedChunk]:
+    """
+    Sync Chroma query wrapped in async function for consistency.
+    
+    Args:
+        query: Search query
+        k: Number of chunks to retrieve
+        filter_images_only: If True, only return chunks from standalone image files (type='image')
+                           Excludes PDF pages with vision summaries (type='multimodal')
+    """
+    collection = get_or_create_collection()
+    
+    # ✅ Add metadata filter if needed
+    where_filter = None
+    if filter_images_only:
+        where_filter = {"type": "image"}  # Only standalone uploaded images
+    
+    results = collection.query(
+        query_texts=[query], 
+        n_results=k,
+        where=where_filter  # ✅ Apply filter here
+    )
+    
+    chunks: List[RetrievedChunk] = []
+    for doc_id, doc, meta, dist in zip(
+        results["ids"][0],
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0],
+    ):
+        chunks.append(
+            RetrievedChunk(
+                text=doc,
+                source=meta.get("source", doc_id),
+                score=float(dist),
+                type=meta.get("type"),
+                page=meta.get("page"),
+            )
+        )
+    
     return chunks
 
 def build_prompt(query: str, chunks: List[RetrievedChunk]) -> str:
@@ -103,6 +139,14 @@ Additional rules for mathematics:
 
 Answer:""".strip()
 
+# Map frontend model names to actual API model names
+MODEL_MAP = {
+    "gpt4o-mini": ("gpt-4o-mini", "openai"),
+    "gpt4o": ("gpt-4o", "openai"),
+    "claude-haiku": ("claude-haiku-4.5", "claude"),
+    "claude-sonnet": ("claude-sonnet-4.5", "claude"),
+}
+
 async def stream_chat_chat_endpoint(req: ChatRequest):
     return StreamingResponse(
         stream_chat_answer(
@@ -127,6 +171,7 @@ def build_chat_prompt(
             prefix = "User:" if h.role == "user" else "Assistant:"
             lines.append(f"{prefix} {h.text}")
         history_str = "\n\nPrevious conversation:\n" + "\n".join(lines)
+
     if use_context and chunks:
         context_lines = []
         for i, c in enumerate(chunks):
@@ -134,29 +179,64 @@ def build_chat_prompt(
                 f"[Snippet {i+1} | source={c.source} | page={c.page} | type={c.type}]\n"
                 f"{c.text}\n"
             )
+        
         context_str = "\n\n".join(context_lines)
-
+        
         return f"""
 You are OptiMIR - Optimized Multi‑Modal Intelligent Retrieval, a highly precise document QA assistant designed to help users explore and understand their workspace documents.
 
 ### CORE RULES:
+
 1. Identity: If asked "who are you," identify as OptiMIR. Do not claim to be the author of the documents or the user.
-2. Scope: Only answer questions about the uploaded documents or closely related professional topics. 
+
+2. Scope: Only answer questions about the uploaded documents or closely related professional topics.
+
 3. Strict Refusal: Politely refuse questions about unrelated topics (e.g., cooking, movies, music, or politics). State that the system is focused solely on the documents in this workspace.
+
 4. Conversational Tone: Respond naturally and briefly to greetings or light small-talk (e.g., "hi," "how are you").
+
 5. Follow-ups: Use the previous conversation to resolve pronouns like "this", "that", or "it". If the user says "tell me more about that", continue the topic from the last assistant answer, do not switch to a different document.
 
 {history_str}
 
+### CRITICAL GROUNDING RULES:
+
+⚠️ **ABSOLUTE REQUIREMENTS - VIOLATING THESE IS A CRITICAL ERROR:**
+
+1. **ZERO INFERENCE**: Do NOT infer, assume, or elaborate beyond what is EXPLICITLY stated in the snippets.
+   - ❌ BAD: "These involve activities where banks act as intermediaries, accepting deposits and providing loans"
+   - ✅ GOOD: "These involve activities where banks act as intermediaries (as mentioned in the table of contents)"
+
+2. **ADMIT LIMITATIONS**: If snippets contain only section titles, headings, or incomplete information:
+   - State clearly: "The provided documents only show [table of contents/section headings/etc.], not the detailed content."
+   - Suggest: "I'd recommend reviewing pages X-Y directly for the full information."
+
+3. **NO WORLD KNOWLEDGE**: Do NOT add facts from your training data, even if they're common knowledge.
+   - Only use information present in the snippets below.
+
+4. **SNIPPET TRANSPARENCY**: If you see incomplete information (e.g., chapter titles without content), acknowledge this limitation explicitly.
+
 ### GROUNDING & CITATIONS:
+
 1. Grounding: Base your entire response solely on the information inside the snippets below.
+
 2. Strict Refusal: If the snippets truly do NOT contain enough information to answer, say:
-   "I am sorry, but the provided documents do not contain information to answer this question."
-   Do NOT use outside knowledge.
+   "I am sorry, but the provided documents do not contain enough information to answer this question fully. The available snippets only show [what you have], but not [what's needed]."
+
 3. Synthesis: When answering broad or summary-style questions, combine information from ALL
    relevant snippets to describe the main ideas, even if each snippet is partial.
+
 4. Irrelevance Filter: Ignore any information that is not directly related to the question.
+
 5. No Hallucination: Do not invent facts that are not supported by the snippets.
+
+### FORMATTING GUIDELINES:
+
+1. **Structure**: Use clear sections with bold headings when covering multiple topics
+   
+2. **Lists**: Use bullet points (-) or numbered lists for multiple items
+   
+3. **Bold text**: Use **bold** for document/file names, section titles, key figures
 
 SNIPPETS:
 {context_str}
@@ -164,8 +244,7 @@ SNIPPETS:
 USER QUESTION:
 {query}
 
-Answer concisely:""".strip()
-
+Answer concisely with proper formatting. If the snippets are incomplete, acknowledge this limitation:""".strip()
     # No context → pure but still narrow chat
     return f"""
 You are OptiMIR - Optimized Multi‑Modal Intelligent Retrieval, a highly precise document QA assistant designed to help users explore and understand their workspace documents.
@@ -213,7 +292,7 @@ async def answer_with_claude(prompt: str) -> str:
 
 async def rag_answer(
     query: str,
-    model: Literal["gpt4o", "claude"] = "gpt4o",
+    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini",  # ✅ FIXED
 ) -> RAGResponse:
     chunks = await retrieve_chunks(query)
     prompt = build_prompt(query, chunks)
@@ -228,59 +307,32 @@ async def rag_answer(
         model_name = "gpt-4o-mini"
 
     print(f"--- [LOG] Answer generated by: {model_name} ---\n")
-    # minimal Ragas trace
-    RAG_LOG.append(
-        {
-            "question": query,
-            "answer": answer,
-            "contexts": [c.text for c in chunks],
-        }
+    
+    # ✅ NEW: Use the centralized logging function
+    log_rag_interaction(
+        question=query,
+        answer=answer,
+        contexts=[c.text for c in chunks]
     )
 
     return RAGResponse(answer=answer, model=model_name, chunks=chunks)
 
-async def run_ragas_eval(limit: int | None = 50) -> dict:
-    samples = RAG_LOG[-limit:] if (limit and len(RAG_LOG) > limit) else RAG_LOG
-    if not samples:
-        return {"status": "empty", "count": 0}
-
-    data = {
-        "question": [s["question"] for s in samples],
-        "answer": [s["answer"] for s in samples],
-        "contexts": [s["contexts"] for s in samples],
-    }
-
-    ds = Dataset.from_dict(data)
-
-    # IMPORTANT: run RAGAS in a separate thread
-    loop = asyncio.get_running_loop()
-    eval_fn = partial(evaluate, ds, metrics=[Faithfulness()])
-    result = await loop.run_in_executor(None, eval_fn)
-
-    scores = result.scores or []
-    faithfulness_score = scores[0] if scores else None
-
-    return {
-        "status": "ok",
-        "count": len(samples),
-        "scores": {
-            "faithfulness": faithfulness_score,
-        },
-    }
-
 # STREAMING LLM CALLS (for /query/stream)
 
-CHEAP_CHAT_MODEL = "gpt-4.1-nano"  # or "gpt-5-nano"
+CHEAP_CHAT_MODEL = "gpt-4o-mini" 
 
-async def stream_chat_openai(prompt: str) -> AsyncGenerator[str, None]:
+async def stream_chat_openai(
+    prompt: str, 
+    model: str = "gpt-4o-mini"  # ✅ Accept model parameter
+) -> AsyncGenerator[str, None]:
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     start_time = time.time()
 
     stream = await client.chat.completions.create(
-        model=CHEAP_CHAT_MODEL,
+        model=model,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=512,
-        temperature=0.5,
+        max_tokens=1024,
+        temperature=0.2,
         stream=True,
     )
 
@@ -297,15 +349,19 @@ async def stream_chat_openai(prompt: str) -> AsyncGenerator[str, None]:
     print(f"--- [LATENCY] Chat OpenAI Total: {time.time() - start_time:.2f}s ---")
 
 
-async def stream_chat_claude(prompt: str) -> AsyncGenerator[str, None]:
+async def stream_chat_claude(
+    prompt: str, 
+    model: str = "claude-haiku-4.5"  
+) -> AsyncGenerator[str, None]:
+    """Stream response from Claude."""
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     start_time = time.time()
     first_token = True
 
     async with client.messages.stream(
-        model="claude-haiku-4-5",
-        max_tokens=512,
-        temperature=0.4,
+        model=model,
+        max_tokens=1024,
+        temperature=0.2,
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
         async for event in stream:
@@ -322,7 +378,7 @@ async def stream_chat_claude(prompt: str) -> AsyncGenerator[str, None]:
 
 async def stream_chat_answer(
     query: str,
-    model: Literal["gpt4o", "claude"] = "gpt4o",
+    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini",
     use_context: bool = True,
     history: list[ChatHistoryItem] | None = None,
 ) -> AsyncGenerator[str, None]:
@@ -405,7 +461,7 @@ async def stream_chat_answer(
         yield "data: [DONE]\n\n"
         return
 
-    # ----- 2) Retrieval logic (same spirit as query/stream) -----
+    # ----- 2) Retrieval logic with smart filtering -----
     summary_triggers = [
         "summarize the pdf",
         "summarize this pdf",
@@ -415,61 +471,106 @@ async def stream_chat_answer(
         "give me a summary",
         "high level summary",
     ]
+
     is_summary = any(t in lower_q for t in summary_triggers)
+
+    # ✅ NEW: Detect standalone image questions (user uploaded .jpg/.png)
+    standalone_image_triggers = [
+        "what's in the image",
+        "what is in the image",
+        "whats in the image",
+        "describe the image",
+        "tell me about the image",
+        "what does the image show",
+        "analyze the image",
+        "explain the image",
+    ]
+
+    is_standalone_image_question = any(t in lower_q for t in standalone_image_triggers)
+
+    # ✅ NEW: Questions about all documents (include PDFs with images)
+    all_docs_triggers = [
+        "what documents do i have",
+        "list all documents",
+        "list documents",
+        "show all files",
+        "what files are uploaded",
+        "what's uploaded",
+        "show me everything",
+    ]
+
+    is_all_docs_question = any(t in lower_q for t in all_docs_triggers)
 
     if use_context and not is_smalltalk:
         if is_summary:
+            # Broad summaries need more chunks
             chunks = await retrieve_chunks(query, k=20)
+        elif is_standalone_image_question:
+            # ✅ CRITICAL: Only get standalone image files, NOT PDF pages with vision
+            chunks = await retrieve_chunks(query, k=10, filter_images_only=True)
+        elif is_all_docs_question:
+            # Get all document types for comprehensive listing
+            chunks = await retrieve_chunks(query, k=15)
         else:
+            # Default retrieval for specific questions
             chunks = await retrieve_chunks(query, k=12)
     else:
         chunks = []
 
     # ----- 3) Build prompt + send meta with chunks -----
-    prompt = build_chat_prompt(query, chunks, use_context=use_context, history=history)
+    # Map to actual model names
+    actual_model, provider = MODEL_MAP[model]
+    
+    # Build prompt
+    prompt = build_chat_prompt(query, chunks, use_context, history or [])
+    
+    # Metadata
     meta = {
-        "type": "meta",
-        "mode": "chat",
-        "model": "claude-haiku-4.5" if model == "claude" else CHEAP_CHAT_MODEL,
-        "use_context": use_context and not is_smalltalk,
-        "is_smalltalk": is_smalltalk,
-        "is_off_scope": False,
-        "chunks": [c.model_dump() for c in chunks] if chunks else [],
+        "model": actual_model,
+        "provider": provider,
+        "timestamp": time.time(),
+        "chunks_used": len(chunks) if chunks else 0,
     }
-    yield f"data: {json.dumps(meta)}\n\n"
-
-    # ----- 4) Stream tokens AND buffer answer for RAGAS -----
+    
+    yield f"data: {json.dumps({'type': 'meta', 'data': meta})}\n\n"
+    
+    # Route to correct provider
+    # Route to correct provider
     answer_text = ""
+    if provider == "claude":
+        async for chunk in stream_chat_claude(prompt, model=actual_model):
+            # chunk is already formatted as SSE string
+            yield chunk
+            
+            # Extract text for logging
+            if '"type":"content"' in chunk or '"type": "content"' in chunk:
+                try:
+                    data = json.loads(chunk.replace("data: ", "").strip())
+                    if data.get("type") == "content":
+                        answer_text += data.get("text", "")
+                except:
+                    pass
+    else:  # openai
+        async for chunk in stream_chat_openai(prompt, model=actual_model):
+            # chunk is already formatted as SSE string
+            yield chunk
+            
+            # Extract text for logging
+            if '"type":"content"' in chunk or '"type": "content"' in chunk:
+                try:
+                    data = json.loads(chunk.replace("data: ", "").strip())
+                    if data.get("type") == "content":
+                        answer_text += data.get("text", "")
+                except:
+                    pass
 
-    if model == "claude":
-        async for ev in stream_chat_claude(prompt):
-            try:
-                payload = json.loads(ev.replace("data:", "").strip())
-                if payload.get("type") == "token":
-                    answer_text += payload.get("token", "")
-            except Exception:
-                pass
-            yield ev
-    else:
-        async for ev in stream_chat_openai(prompt):
-            try:
-                payload = json.loads(ev.replace("data:", "").strip())
-                if payload.get("type") == "token":
-                    answer_text += payload.get("token", "")
-            except Exception:
-                pass
-            yield ev
-
-    # ----- 5) Log for RAGAS (single unified stream) -----
-    if chunks:
-        RAG_LOG.append(
-            {
-                "question": query,
-                "answer": answer_text,
-                "contexts": [c.text for c in chunks],
-            }
+        log_rag_interaction(
+            question=query,
+            answer=answer_text,
+            contexts=[c.text for c in chunks],
+            model=actual_model  # ✅ Track which model answered
         )
-
+    
     yield "data: [DONE]\n\n"
     
 # STREAMING LLM CALLS (for /query/stream)
