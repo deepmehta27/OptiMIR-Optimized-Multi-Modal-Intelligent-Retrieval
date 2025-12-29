@@ -98,19 +98,27 @@ TOTAL AMOUNT: {result.get('currency', '')} {result.get('total_amount', 'N/A')}
     collection = get_or_create_collection()
     
     # Create metadata
-    all_metadata = [
-        {
+    all_metadata = []
+    for idx in range(len(chunks)):
+        # Base metadata (always present)
+        meta = {
             "source": file.filename,
             "page": 1,
             "type": "image",
             "chunk_index": idx,
-            "document_type": result.get("document_type"),
-            "vendor": result.get("vendor"),
-            "date": result.get("date"),
-            "total_amount": result.get("total_amount"),
         }
-        for idx in range(len(chunks))
-    ]
+        
+        # ✅ Only add optional fields if they're not None
+        if result.get("document_type"):
+            meta["document_type"] = result["document_type"]
+        if result.get("vendor"):
+            meta["vendor"] = result["vendor"]
+        if result.get("date"):
+            meta["date"] = result["date"]
+        if result.get("total_amount"):
+            meta["total_amount"] = result["total_amount"]
+        
+        all_metadata.append(meta)
     
     ids = [f"{file.filename}_img_c{m['chunk_index']}" for m in all_metadata]
     

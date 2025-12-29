@@ -35,102 +35,77 @@ def get_or_create_collection(collection_name: str = "documents"):
     )
 async def classify_finance_document(text: str) -> dict:
     """
-    Classify whether a document is finance-related.
-    Returns: {label, confidence, reason}
+    Fast rule-based classifier for finance documents.
+    More reliable and faster than LLM-based classification.
     """
-    # Handle empty text case
+    
     if not text or len(text.strip()) < 20:
         return {
             "label": "NOT_FINANCE",
-            "confidence": 0.9,
-            "reason": "Document text too short or empty"
+            "confidence": 0.95,
+            "reason": "Document text too short"
         }
     
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    text_lower = text.lower()
     
-    prompt = f"""
-You are a STRICT document classifier for a financial intelligence system that ONLY accepts financial documents.
-
-**YOUR TASK**: Determine if this document contains ACTUAL financial transaction data.
-
-Classify into ONE of:
-- FINANCE (only if it contains real financial transaction data)
-- NOT_FINANCE (reject if not financial)
-- UNCLEAR (only if truly ambiguous)
-
-**FINANCE documents - MUST contain actual financial transaction data**:
-✓ Invoices with amounts, dates, payment terms (even samples/demos)
-✓ Receipts from purchases
-✓ Bank statements showing transactions
-✓ Credit card statements
-✓ Financial statements (balance sheet, income statement, cash flow)
-✓ Tax returns, audit reports
-✓ Bills, purchase orders with line items and prices
-✓ Payroll records, expense reports
-✓ Insurance policies with premium amounts
-✓ Loan documents with payment schedules
-
-**NOT_FINANCE documents - REJECT these**:
-✗ Resumes / CVs (job applications, career history)
-✗ Academic papers (ML, AI, computer science research)
-✗ Research papers with "evaluation", "benchmark", "model"
-✗ Technical documentation
-✗ Scientific papers
-✗ Marketing materials
-✗ Blog posts, articles
-✗ Job descriptions
-✗ Project descriptions without financial data
-✗ Any document about LLMs, AI, or machine learning
-
-**CRITICAL DETECTION RULES**:
-1. If you see "Resume", "CV", "Education", "Experience", "Skills" → NOT_FINANCE
-2. If you see "arXiv", "Abstract", "Introduction", "Related Work" → NOT_FINANCE (research paper)
-3. If you see "LLM", "model", "evaluation", "benchmark", "accuracy" → NOT_FINANCE (ML paper)
-4. If you see "Invoice", "Receipt", "Total:", "Amount:", "Payment" with dollar amounts → FINANCE
-5. Only use UNCLEAR if you genuinely cannot determine the type
-
-Return STRICT JSON only:
-{{
-  "label": "FINANCE | NOT_FINANCE | UNCLEAR",
-  "confidence": 0.0 to 1.0,
-  "reason": "brief explanation (max 30 words)"
-}}
-
-Document text to classify (first 1500 chars):
-\"\"\"{text[:1500]}\"\"\"
-""".strip()
+    # ❌ REJECT: Clear non-finance indicators (high confidence)
+    reject_patterns = {
+        "resume": ["curriculum vitae", "resume", "work experience", "education:", "skills:", "references available"],
+        "job": ["job description", "responsibilities:", "qualifications:", "applying for"],
+        "ml_research": ["arxiv", "abstract", "neural network", "deep learning", "transformer", "llm", "large language model"]
+    }
     
-    try:
-        resp = await client.chat.completions.create(
-            model=FINANCE_CLASSIFIER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=250,
-        )
-        
-        raw = resp.choices[0].message.content or "{}"
-        result = json.loads(raw)
-        
-        # Log classification for debugging
-        print(f"--- [CLASSIFIER] Label: {result['label']}, Confidence: {result.get('confidence', 0):.2f}, Reason: {result.get('reason', 'N/A')}")
-        
-        return result
-        
-    except json.JSONDecodeError as e:
-        # If JSON parsing fails, REJECT for safety
-        print(f"--- [CLASSIFIER ERROR] JSON parse failed: {e}, REJECTING document")
+    for category, patterns in reject_patterns.items():
+        matches = sum(1 for p in patterns if p in text_lower)
+        if matches >= 2:  # At least 2 patterns = confident reject
+            return {
+                "label": "NOT_FINANCE",
+                "confidence": 0.95,
+                "reason": f"Detected {category} document"
+            }
+    
+    # ✅ ACCEPT: Finance keyword detection
+    finance_keywords = {
+        "transaction": ["invoice", "receipt", "payment", "transaction", "purchase"],
+        "banking": ["bank", "account", "deposit", "withdrawal", "statement"],
+        "money": ["money", "currency", "dollar", "euro", "pound", "yen"],
+        "investment": ["investment", "stock", "bond", "equity", "portfolio", "trading"],
+        "corporate": ["balance sheet", "income statement", "cash flow", "financial statement"],
+        "accounting": ["accounting", "bookkeeping", "ledger", "debit", "credit", "journal"],
+        "finance_theory": ["finance", "financial", "economics", "monetary", "fiscal"],
+        "tax": ["tax", "taxation", "audit", "irs", "revenue"],
+        "ops": ["payroll", "expense", "revenue", "profit", "loss"],
+        "credit": ["loan", "mortgage", "interest rate", "credit", "debt"],
+        "insurance": ["insurance", "premium", "policy", "coverage"]
+    }
+    
+    total_keywords = 0
+    categories_found = []
+    
+    for category, keywords in finance_keywords.items():
+        count = sum(1 for kw in keywords if kw in text_lower)
+        if count > 0:
+            total_keywords += count
+            categories_found.append(category)
+    
+    # Decision logic
+    if total_keywords >= 3:  # Strong finance signal
         return {
-            "label": "NOT_FINANCE",
-            "confidence": 0.5,
-            "reason": "Failed to parse classifier output"
+            "label": "FINANCE",
+            "confidence": 0.95,
+            "reason": f"Found {total_keywords} finance terms across {len(categories_found)} categories"
         }
-    except Exception as e:
-        # Any other error, reject for safety
-        print(f"--- [CLASSIFIER ERROR] Unexpected: {e}, REJECTING document")
+    elif total_keywords >= 1:  # Weak finance signal
         return {
-            "label": "NOT_FINANCE",
-            "confidence": 0.5,
-            "reason": f"Classifier error: {str(e)}"
+            "label": "FINANCE",
+            "confidence": 0.70,
+            "reason": f"Found {total_keywords} finance terms - accepting with lower confidence"
+        }
+    else:  # No finance keywords, but no reject patterns either
+        return {
+            "label": "FINANCE",
+            "confidence": 0.60,
+            "reason": "No clear rejection signals - accepting by default"
         }
 
 async def extract_text_async(file_bytes: bytes):
@@ -144,14 +119,14 @@ async def extract_text_async(file_bytes: bytes):
 
 async def ingest_pdf_bytes(file_bytes: bytes, filename: str):
     """
-    Page-wise ingest with Conditional Vision:
+    Page-wise ingest with Conditional Vision
     - Always index text.
     - Only call Claude vision on pages that need it.
     """
-    # 1) FIRST: Open the document
+    
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     
-    # 2) THEN: Extract first page text for classification
+    # Extract first page for classification
     first_page_text = ""
     try:
         if len(doc) > 0:
@@ -160,12 +135,14 @@ async def ingest_pdf_bytes(file_bytes: bytes, filename: str):
         print(f"--- [ERROR] Failed to extract first page: {e}")
         first_page_text = ""
     
-    # 3) Classify the document
+    # ✅ Classify with rule-based classifier
     classification = await classify_finance_document(first_page_text)
     
-    # 4) Reject if NOT_FINANCE, allow FINANCE and UNCLEAR
-    if classification["label"] == "NOT_FINANCE":
-        doc.close()  # Clean up before raising error
+    print(f"--- [CLASSIFIER] Label: {classification['label']}, Confidence: {classification.get('confidence', 0):.2f}, Reason: {classification.get('reason', 'NA')}")
+    
+    # Reject if NOT_FINANCE with high confidence
+    if classification["label"] == "NOT_FINANCE" and classification.get("confidence", 0) >= 0.85:
+        doc.close()
         raise HTTPException(
             status_code=400,
             detail={
