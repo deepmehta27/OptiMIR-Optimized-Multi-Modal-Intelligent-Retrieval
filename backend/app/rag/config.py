@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 CLAUDE_VISION_MODEL = "claude-sonnet-4-5"
-GPT_VISION_MODEL  = "gpt-4.1-nano"
+GPT_VISION_MODEL  = "gpt-4o"
 FINANCE_CLASSIFIER_MODEL = "gpt-4.1-nano"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
