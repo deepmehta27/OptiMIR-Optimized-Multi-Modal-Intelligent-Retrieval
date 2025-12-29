@@ -12,35 +12,14 @@ from .ingest import get_or_create_collection, list_uploaded_sources
 from .ragas_eval import log_rag_interaction
 from .hybrid_search import hybrid_retrieve_chunks
 import time
+from .types import (
+    RetrievedChunk,
+    QueryRequest,
+    RAGResponse,
+    ChatHistoryItem,
+    ChatRequest
+)
 
-# --- Schemas ---
-class QueryRequest(BaseModel):
-    question: str
-    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"  # ✅ FIXED
-    use_context: bool = True
-
-class RetrievedChunk(BaseModel):
-    text: str
-    source: str
-    score: float
-    type: str | None = None
-    page: int | None = None
-
-class RAGResponse(BaseModel):
-    answer: str
-    model: str
-    chunks: List[RetrievedChunk]
-
-class ChatHistoryItem(BaseModel):
-    role: Literal["user", "assistant"]
-    text: str
-
-class ChatRequest(BaseModel):
-    question: str
-    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"
-    use_context: bool = True
-    history: list[ChatHistoryItem] | None = None
-    
 # Retrieval + Prompt
 
 async def retrieve_chunks(query: str, k: int = 4) -> List[RetrievedChunk]:
@@ -520,9 +499,7 @@ async def stream_chat_answer(
     retrieval_start = time.time()
 
     # Yield retrieval start event
-    if use_context and not is_smalltalk:
-        yield f"data: {json.dumps({{'type': 'status', 'status': 'retrieving', 'message': '🔍 Searching documents...'}})}\n\n"
-
+    
     # Calculate retrieval time (retrieval already happened above in your code)
     retrieval_time = time.time() - retrieval_start if use_context else 0
 
@@ -554,18 +531,9 @@ async def stream_chat_answer(
             } for c in chunks
         ] if chunks else []
     }
-
-    # Send retrieval complete status
-    if use_context and chunks:
-        num_sources = len(set([c.source for c in chunks]))
-        yield f"data: {json.dumps({{'type': 'status', 'status': 'retrieved', 'message': f'✅ Found relevant info from {{num_sources}} document(s)'}})}\n\n"
-
     # Send full metadata with chunks
     yield f"data: {json.dumps(meta_payload)}\n\n"
-
-    # Send generating status
-    yield f"data: {json.dumps({{'type': 'status', 'status': 'generating', 'message': f'⚡ Generating with {{actual_model}}...'}})}\n\n"
-
+    
     # Route to correct provider
     generation_start = time.time()
     answer_text = ""
@@ -600,10 +568,7 @@ async def stream_chat_answer(
     # Calculate total latency
     generation_time = time.time() - generation_start
     total_latency = time.time() - retrieval_start
-
-    # Send latency metrics
-    yield f"data: {json.dumps({{'type': 'latency', 'total_ms': {round(total_latency * 1000, 2)}, 'retrieval_ms': {round(retrieval_time * 1000, 2)}, 'generation_ms': {round(generation_time * 1000, 2)}}})}\n\n"
-
+    
     # Log interaction for RAGAS
     log_rag_interaction(
         question=query,
