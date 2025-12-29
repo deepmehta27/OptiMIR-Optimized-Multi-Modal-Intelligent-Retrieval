@@ -15,4 +15,5 @@ anthropic
 asyncpg
 ragas
 datasets
-
+rank-bm25
+numpy
