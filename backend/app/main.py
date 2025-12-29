@@ -9,11 +9,13 @@ from .rag.ingest import (
     refresh_uploaded_sources_from_chroma,
     get_or_create_collection,
 )
-from .rag.retrieval import (
-    rag_answer,
+from .rag.types import ( 
     RAGResponse,
     QueryRequest,
     ChatRequest,
+)
+from .rag.retrieval import (
+    rag_answer,
     stream_chat_answer,
 )
 from .rag.ragas_eval import (
