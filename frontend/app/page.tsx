@@ -23,11 +23,19 @@ type RagasResult = {
   status: string;
   count: number;
   scores?: {
-    faithfulness?: {
-      faithfulness?: number;
-    };
+    faithfulness?: number;
+    answer_relevancy?: number;
+    context_precision?: number;
+    context_recall?: number;
+  };
+  interpretation?: {
+    faithfulness?: string;
+    answer_relevancy?: string;
+    context_precision?: string;
+    context_recall?: string;
   };
 };
+
 const models: Model[] = [
   { 
     id: "gpt4o-mini", 
@@ -54,13 +62,6 @@ const models: Model[] = [
     tier: "Premium",
   },
 ];
-
-const BACKEND_MODEL_MAP: Record<ModelId, "gpt4o" | "claude"> = {
-  "gpt4o-mini": "gpt4o",
-  "gpt4o": "gpt4o",
-  "claude-haiku": "claude",
-  "claude-sonnet": "claude",
-};
 
 type SourceChunk = {
   source: string;
@@ -92,31 +93,58 @@ export default function HomePage() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isBatchUploading, setIsBatchUploading] = useState(false);
   const [images, setImages] = useState<string[]>([]);
+  const [selectedEvalModel, setSelectedEvalModel] = useState<ModelId | "all">("all");
+  const [showEvalModal, setShowEvalModal] = useState(false);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
-useEffect(() => {
-    if (isSending) {
-      const interval = setInterval(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 100); // Scroll every 100ms while streaming
-      
-      return () => clearInterval(interval);
-    }
-  }, [isSending]);
+
   async function runRagasEvalFrontend() {
   setIsEvaluating(true);
   try {
+    const body: { limit: number; model_filter?: string } = { limit: 10 };
+    
+    // Add model filter if not "all"
+    if (selectedEvalModel !== "all") {
+      // Map frontend model to backend model name
+      const modelMap: Record<ModelId, string> = {
+        "gpt4o-mini": "gpt-4o-mini",
+        "gpt4o": "gpt-4o",
+        "claude-haiku": "claude-haiku-4-5-20251001",
+        "claude-sonnet": "claude-sonnet-4-5-20250929",
+      };
+      body.model_filter = modelMap[selectedEvalModel as ModelId];
+    }
+    
     const res = await fetch("http://localhost:8000/evaluate/ragas", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ limit: 5 }),
+      body: JSON.stringify(body),
     });
+    
     const data = (await res.json()) as RagasResult;
     setRagasResult(data);
+    
+    // Show success message
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        text: `✅ **Evaluation Complete**\n\nAnalyzed ${data.count} interactions${
+          selectedEvalModel !== "all" ? ` (${models.find(m => m.id === selectedEvalModel)?.name})` : ""
+        }.\n\nCheck the sidebar for detailed scores.`,
+      },
+    ]);
   } catch (e) {
     console.error("Ragas eval failed", e);
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        text: "❌ Evaluation failed. Make sure you have some conversations logged first.",
+      },
+    ]);
   } finally {
     setIsEvaluating(false);
   }
@@ -248,10 +276,9 @@ async function ingestImage(selectedFile: File) {
 
   setIsSending(true);
 
-  const backendModel = BACKEND_MODEL_MAP[model];
   const body = JSON.stringify({
     question: userText,
-    model: backendModel,
+    model: model,
     use_context: true,
     history: messages.slice(-4),
   });
@@ -459,28 +486,60 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
   <main className="min-h-screen flex bg-white text-gray-900 font-sans">
     {/* Sidebar */}
     <aside className="h-screen w-64 border-r border-gray-200 bg-white px-5 py-6 hidden md:flex flex-col shrink-0">
-      <div className="mb-4 rounded-2xl border border-gray-200 bg-gray-50 px-3 py-2.5">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[11px] font-semibold text-gray-500">
-            RAG quality (last {ragasResult?.count ?? 0} runs)
-          </p>
-          <button
-            onClick={runRagasEvalFrontend}
-            disabled={isEvaluating}
-            className="text-[10px] px-2 py-0.5 rounded-full border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-50"
-          >
-            {isEvaluating ? "Evaluating..." : "Run eval"}
-          </button>
-        </div>
-        <div className="flex justify-between text-xs text-gray-700">
-          <span>Faithfulness</span>
-          <span>
-            {typeof ragasResult?.scores?.faithfulness?.faithfulness === "number"
-              ? ragasResult.scores.faithfulness.faithfulness.toFixed(2)
-              : "-"}
+<div className="mb-4 rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
+  <div className="flex items-center justify-between mb-3">
+    <div>
+      <p className="text-xs font-semibold text-gray-700">RAG Quality Score</p>
+      <p className="text-[10px] text-gray-400 mt-0.5">
+        Last {ragasResult?.count ?? 0} interactions
+      </p>
+    </div>
+    <button
+      onClick={() => setShowEvalModal(true)}
+      disabled={isEvaluating}
+      className="text-[10px] px-3 py-1.5 rounded-full bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+    >
+      {isEvaluating ? (
+        <span className="flex items-center gap-1">
+          <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/>
+          </svg>
+          Evaluating...
+        </span>
+      ) : "Evaluate"}
+    </button>
+  </div>
+
+  {/* Score Grid */}
+<div className="grid grid-cols-2 gap-2">
+  {[
+    { label: "Faithfulness", key: "faithfulness" as const, desc: "No hallucinations" },
+    { label: "Relevancy", key: "answer_relevancy" as const, desc: "On-topic answers" },
+    { label: "Precision", key: "context_precision" as const, desc: "Quality retrieval" },
+    { label: "Recall", key: "context_recall" as const, desc: "Complete context" }
+  ].map((metric) => {
+    const score = ragasResult?.scores?.[metric.key];
+    const value = typeof score === "number" ? score : 0;
+    const percentage = (value * 100).toFixed(0);
+    const color = value >= 0.7 ? "text-green-600" : value >= 0.5 ? "text-yellow-600" : "text-red-600";
+    
+    return (
+      <div key={metric.key} className="bg-gray-50 rounded-lg px-2 py-2">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] font-medium text-gray-600">
+            {metric.label}
+          </span>
+          <span className={`text-xs font-bold ${color}`}>
+            {ragasResult ? `${percentage}%` : "-"}
           </span>
         </div>
+        <p className="text-[9px] text-gray-400">{metric.desc}</p>
       </div>
+    );
+  })}
+</div>
+</div>
       
       <h2 className="text-sm font-semibold text-gray-700 mb-4 tracking-tight">
   Documents
@@ -610,7 +669,7 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     {/* Main chat area */}
     <div className="flex-1 flex flex-col h-screen relative overflow-hidden">
       {/* Scrollable messages */}
-      <section className="flex-1 overflow-y-auto">
+      <section className="flex-1 overflow-y-auto pb-48">
         <div className="max-w-4xl mx-auto w-full px-8 pt-16 pb-40">
           {/* Greeting when empty */}
           {messages.length === 0 && (
@@ -681,9 +740,12 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
       </section>
 
       {/* Floating input */}
-<section className="absolute bottom-0 left-0 right-0 bg-linear-to-t from-white via-white to-transparent pt-10 pb-6">
-  <div className="max-w-4xl mx-auto w-full px-6">
-    {/* File attachment chips - shown ABOVE the input box */}
+<section 
+  className="fixed bottom-0 left-0 md:left-64 right-0 bg-linear-to-t from-white via-white to-transparent pt-10 pb-6 z-50"
+  style={{ pointerEvents: 'none' }}
+>
+  <div className="max-w-4xl mx-auto w-full px-6" style={{ pointerEvents: 'auto' }}>
+    {/* File attachment chips */}
     {selectedFiles.length > 0 && (
       <div className="mb-3 flex flex-wrap gap-2">
         {selectedFiles.map((file, idx) => (
@@ -930,6 +992,126 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
         </div>
       )}
     </div>
+    {/* Evaluation Modal */}
+{showEvalModal && (
+  <div
+    className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+    onClick={() => setShowEvalModal(false)}
+  >
+    <div
+      className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Header */}
+      <div className="px-6 py-5 border-b border-gray-100 bg-linear-to-r from-blue-50 to-white">
+        <h3 className="text-lg font-semibold text-gray-900">
+          Evaluate RAG Quality
+        </h3>
+        <p className="text-xs text-gray-500 mt-1">
+          Measure how well your AI is performing using RAGAS metrics
+        </p>
+      </div>
+
+      {/* Content */}
+      <div className="px-6 py-5">
+        {/* What is RAGAS */}
+        <div className="mb-5 p-3 bg-blue-50 rounded-xl border border-blue-100">
+          <div className="flex items-start gap-2">
+            <svg className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd"/>
+            </svg>
+            <div>
+              <p className="text-xs font-medium text-blue-900 mb-1">
+                What is RAGAS?
+              </p>
+              <p className="text-[11px] text-blue-700 leading-relaxed">
+                RAGAS evaluates your RAG system across 4 dimensions: faithfulness (no hallucinations), 
+                answer relevancy (on-topic), context precision (quality retrieval), and context recall 
+                (completeness). Higher scores mean better performance.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Model Selection */}
+        <div className="mb-5">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Select Model to Evaluate
+          </label>
+          <div className="space-y-2">
+            {[
+              { id: "all", name: "All Models", desc: "Evaluate all conversations" },
+              ...models.map(m => ({ 
+                id: m.id, 
+                name: m.name, 
+                desc: `Only ${m.name} conversations` 
+              }))
+            ].map((option) => (
+              <button
+                key={option.id}
+                onClick={() => setSelectedEvalModel(option.id as ModelId | "all")}
+                className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-all ${
+                  selectedEvalModel === option.id
+                    ? "border-blue-500 bg-blue-50"
+                    : "border-gray-200 hover:border-gray-300 bg-white"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">
+                      {option.name}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {option.desc}
+                    </p>
+                  </div>
+                  {selectedEvalModel === option.id && (
+                    <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                    </svg>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Warning */}
+        <div className="mb-5 p-3 bg-amber-50 rounded-xl border border-amber-100">
+          <div className="flex items-start gap-2">
+            <svg className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"/>
+            </svg>
+            <p className="text-[11px] text-amber-800 leading-relaxed">
+              This evaluation uses GPT-4o-mini to judge quality and may take 30-60 seconds. 
+              Make sure you have active conversations logged before running.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="px-6 py-4 bg-gray-50 flex items-center justify-end gap-3">
+        <button
+          onClick={() => setShowEvalModal(false)}
+          className="px-4 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={() => {
+            setShowEvalModal(false);
+            void runRagasEvalFrontend();
+          }}
+          disabled={isEvaluating}
+          className="px-5 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {isEvaluating ? "Evaluating..." : "Start Evaluation"}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
   </main>
 );
 }
