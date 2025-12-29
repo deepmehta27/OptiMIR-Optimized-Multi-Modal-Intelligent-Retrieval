@@ -84,6 +84,7 @@ async def chat_stream(payload: ChatRequest):
             query=payload.question,
             model=payload.model,
             use_context=payload.use_context,
+            history=payload.history
         ):
             yield chunk
 
