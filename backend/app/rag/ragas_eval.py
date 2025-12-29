@@ -6,6 +6,7 @@ import asyncio
 from typing import List, Dict, Optional
 from datasets import Dataset
 from ragas import evaluate
+import math
 from ragas.metrics import (
     faithfulness,
     answer_relevancy,
@@ -121,26 +122,26 @@ async def run_ragas_eval(
             # Result is a Dataset, convert to pandas and get mean scores
             df = result.to_pandas()
             scores = {
-                "faithfulness": float(df["faithfulness"].mean()) if "faithfulness" in df else 0.0,
-                "answer_relevancy": float(df["answer_relevancy"].mean()) if "answer_relevancy" in df else 0.0,
-                "context_precision": float(df["context_precision"].mean()) if "context_precision" in df else 0.0,
-                "context_recall": float(df["context_recall"].mean()) if "context_recall" in df else 0.0,
+                "faithfulness": _sanitize_float(df["faithfulness"].mean()) if "faithfulness" in df else 0.0,
+                "answer_relevancy": _sanitize_float(df["answer_relevancy"].mean()) if "answer_relevancy" in df else 0.0,
+                "context_precision": _sanitize_float(df["context_precision"].mean()) if "context_precision" in df else 0.0,
+                "context_recall": _sanitize_float(df["context_recall"].mean()) if "context_recall" in df else 0.0,
             }
         elif isinstance(result, dict):
             # Result is already a dict
             scores = {
-                "faithfulness": float(result.get("faithfulness", 0)),
-                "answer_relevancy": float(result.get("answer_relevancy", 0)),
-                "context_precision": float(result.get("context_precision", 0)),
-                "context_recall": float(result.get("context_recall", 0)),
+                "faithfulness": _sanitize_float(result.get("faithfulness", 0)),
+                "answer_relevancy": _sanitize_float(result.get("answer_relevancy", 0)),
+                "context_precision": _sanitize_float(result.get("context_precision", 0)),
+                "context_recall": _sanitize_float(result.get("context_recall", 0)),
             }
         else:
             # Fallback: try to access as attributes
             scores = {
-                "faithfulness": float(getattr(result, "faithfulness", 0)),
-                "answer_relevancy": float(getattr(result, "answer_relevancy", 0)),
-                "context_precision": float(getattr(result, "context_precision", 0)),
-                "context_recall": float(getattr(result, "context_recall", 0)),
+                "faithfulness": _sanitize_float(getattr(result, "faithfulness", 0)),
+                "answer_relevancy": _sanitize_float(getattr(result, "answer_relevancy", 0)),
+                "context_precision": _sanitize_float(getattr(result, "context_precision", 0)),
+                "context_recall": _sanitize_float(getattr(result, "context_recall", 0)),
             }
         
         return {
@@ -217,3 +218,19 @@ def clear_ragas_log():
 def get_ragas_log_size() -> int:
     """Get number of logged interactions."""
     return len(RAGAS_LOG)
+
+def _sanitize_float(value: float) -> float:
+    """
+    Convert NaN/Infinity to JSON-safe values.
+    Returns 0.0 for invalid floats.
+    """
+    if value is None:
+        return 0.0
+    
+    try:
+        value = float(value)
+        if math.isnan(value) or math.isinf(value):
+            return 0.0
+        return value
+    except (ValueError, TypeError):
+        return 0.0
