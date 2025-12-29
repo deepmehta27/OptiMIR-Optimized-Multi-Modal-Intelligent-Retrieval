@@ -10,6 +10,7 @@ from .config import OPENAI_API_KEY, ANTHROPIC_API_KEY
 from .ingest import get_or_create_collection
 from .ingest import get_or_create_collection, list_uploaded_sources
 from .ragas_eval import log_rag_interaction
+from .hybrid_search import hybrid_retrieve_chunks
 
 # --- Schemas ---
 class QueryRequest(BaseModel):
@@ -143,8 +144,8 @@ Answer:""".strip()
 MODEL_MAP = {
     "gpt4o-mini": ("gpt-4o-mini", "openai"),
     "gpt4o": ("gpt-4o", "openai"),
-    "claude-haiku": ("claude-haiku-4.5", "claude"),
-    "claude-sonnet": ("claude-sonnet-4.5", "claude"),
+    "claude-haiku": ("claude-haiku-4-5-20251001", "claude"),    
+    "claude-sonnet": ("claude-sonnet-4-5-20250929", "claude"),  
 }
 
 async def stream_chat_chat_endpoint(req: ChatRequest):
@@ -281,8 +282,8 @@ async def answer_with_claude(prompt: str) -> str:
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
     resp = await client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=1024,
+        model="claude-haiku-4-5-20251001",
+        max_tokens=700,
         temperature=0.1,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -331,7 +332,7 @@ async def stream_chat_openai(
     stream = await client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1024,
+        max_tokens=700,
         temperature=0.2,
         stream=True,
     )
@@ -351,7 +352,7 @@ async def stream_chat_openai(
 
 async def stream_chat_claude(
     prompt: str, 
-    model: str = "claude-haiku-4.5"  
+    model: str = "claude-haiku-4-5-20251001"  
 ) -> AsyncGenerator[str, None]:
     """Stream response from Claude."""
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -360,7 +361,7 @@ async def stream_chat_claude(
 
     async with client.messages.stream(
         model=model,
-        max_tokens=1024,
+        max_tokens=700,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
@@ -503,17 +504,13 @@ async def stream_chat_answer(
 
     if use_context and not is_smalltalk:
         if is_summary:
-            # Broad summaries need more chunks
-            chunks = await retrieve_chunks(query, k=20)
+            chunks = await hybrid_retrieve_chunks(query, k=20)  
         elif is_standalone_image_question:
-            # ✅ CRITICAL: Only get standalone image files, NOT PDF pages with vision
-            chunks = await retrieve_chunks(query, k=10, filter_images_only=True)
+            chunks = await retrieve_chunks(query, k=10, filter_images_only=True)  
         elif is_all_docs_question:
-            # Get all document types for comprehensive listing
-            chunks = await retrieve_chunks(query, k=15)
+            chunks = await hybrid_retrieve_chunks(query, k=15)  
         else:
-            # Default retrieval for specific questions
-            chunks = await retrieve_chunks(query, k=12)
+            chunks = await hybrid_retrieve_chunks(query, k=12)  
     else:
         chunks = []
 
@@ -583,7 +580,7 @@ async def stream_openai(prompt: str) -> AsyncGenerator[str, None]:
     stream = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1024,
+        max_tokens=700,
         temperature=0.1,
         stream=True,
     )
