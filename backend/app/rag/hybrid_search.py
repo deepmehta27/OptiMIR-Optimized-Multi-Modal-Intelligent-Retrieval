@@ -4,7 +4,8 @@ Hybrid search combining semantic (vector) + keyword (BM25) retrieval.
 from typing import List
 from rank_bm25 import BM25Okapi
 import numpy as np
-from .retrieval import RetrievedChunk, get_or_create_collection
+from .types import RetrievedChunk
+from .ingest import get_or_create_collection 
 
 class HybridRetriever:
     def __init__(self):
