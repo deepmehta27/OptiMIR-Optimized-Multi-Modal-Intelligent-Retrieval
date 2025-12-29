@@ -74,6 +74,7 @@ type ChatMessage = {
   role: "user" | "assistant";
   text: string;
   sources?: SourceChunk[];
+  responseTime?: number;
 };
 
 const REFUSAL_TEXT =
@@ -95,9 +96,6 @@ export default function HomePage() {
   const [images, setImages] = useState<string[]>([]);
   const [selectedEvalModel, setSelectedEvalModel] = useState<ModelId | "all">("all");
   const [showEvalModal, setShowEvalModal] = useState(false);
-  const [streamingStatus, setStreamingStatus] = useState<string>("");
-  const [retrievalMetrics, setRetrievalMetrics] = useState<{chunks: number; time: number} | null>(null);
-
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -240,7 +238,7 @@ async function ingestImage(selectedFile: File) {
     void refreshPdfs();
   }, []);
 
-  async function sendMessage() {
+   async function sendMessage() {
   if (!message.trim() && selectedFiles.length === 0) return;
   if (isSending || isBatchUploading) return;
 
@@ -278,6 +276,7 @@ async function ingestImage(selectedFile: File) {
   if (!userText) return; // No question asked, just uploaded files
 
   setIsSending(true);
+    const startTime = Date.now();
 
   const body = JSON.stringify({
     question: userText,
@@ -317,70 +316,48 @@ async function ingestImage(selectedFile: File) {
         if (!dataStr || dataStr === "DONE") continue;
 
         try {
-        const payload = JSON.parse(dataStr);
-        
-        // ✅ Handle status updates
-        if (payload.type === "status") {
-          setStreamingStatus(payload.message);
-          // Clear status after 2 seconds
-          setTimeout(() => setStreamingStatus(""), 2000);
-        }
+      const payload = JSON.parse(dataStr);
 
-        // ✅ Handle latency metrics
-        if (payload.type === "latency") {
-          setRetrievalMetrics({
-            chunks: 0, // Will be set from meta
-            time: payload.retrieval_ms
-          });
-        }
+      // ✅ Handle metadata (includes chunks/sources)
+      if (payload.type === "meta") {
+              const chunks = (payload.chunks ?? []) as SourceChunk[];
+              if (chunks.length > 0) {
+                const sources: SourceChunk[] = chunks.map((c) => ({
+                  source: c.source,
+                  page: c.page,
+                  score: c.score,
+                  text: c.text,
+                }));
 
-        // ✅ Handle metadata (includes chunks/sources)
-        if (payload.type === "meta") {
-          const meta = payload.data;
-          setRetrievalMetrics({
-            chunks: meta.chunks_used || 0,
-            time: meta.retrieval_time_ms || 0
-          });
-
-          // Extract sources if available
-          const chunks = (payload.chunks ?? []) as SourceChunk[];
-          if (chunks.length > 0) {
-            const sources: SourceChunk[] = chunks.map((c) => ({
-              source: c.source,
-              page: c.page,
-              score: c.score,
-              text: c.text,
-            }));
-
-            setMessages((prev) => {
-              const copy = [...prev];
-              const last = copy[copy.length - 1];
-              if (last && last.role === "assistant") {
-                last.sources = sources;
-              }
-              return copy;
-            });
-          }
-        }
-
-        // ✅ Handle streaming tokens
-        if (payload.type === "token") {
-          assistantText += payload.token;
           setMessages((prev) => {
             const copy = [...prev];
-            let last = copy[copy.length - 1];
-
-            if (!last || last.role !== "assistant") {
-              last = { role: "assistant", text: "" };
-              copy.push(last);
+            const last = copy[copy.length - 1];
+            if (last && last.role === "assistant") {
+              last.sources = sources;
             }
-            last.text = assistantText;
             return copy;
           });
         }
-      } catch {
-        // ignore parse errors
       }
+
+      // ✅ Handle streaming tokens
+      if (payload.type === "token") {
+        assistantText += payload.token;
+        setMessages((prev) => {
+          const copy = [...prev];
+          let last = copy[copy.length - 1];
+
+          if (!last || last.role !== "assistant") {
+            last = { role: "assistant", text: "" };
+            copy.push(last);
+          }
+          last.text = assistantText;
+          return copy;
+        });
+      }
+    } catch {
+      // ignore parse errors
+    }
 
       }
     }
@@ -398,6 +375,17 @@ async function ingestImage(selectedFile: File) {
     });
   } finally {
     setIsSending(false);
+    // Calculate response time and add to last assistant message
+    const endTime = Date.now();
+    const responseTime = endTime - startTime;
+    setMessages((prev) => {
+      const copy = [...prev];
+      const lastMsg = copy[copy.length - 1];
+      if (lastMsg && lastMsg.role === "assistant") {
+        lastMsg.responseTime = responseTime;
+      }
+      return copy;
+    });
   }
 }
 
@@ -516,6 +504,20 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
   <main className="min-h-screen flex bg-white text-gray-900 font-sans">
     {/* Sidebar */}
     <aside className="h-screen w-64 border-r border-gray-200 bg-white px-5 py-6 hidden md:flex flex-col shrink-0">
+      {/* Metrics Explanation - appears BEFORE scorecard */}
+        <div className="mb-3 p-3 bg-linear-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-100">
+          <div className="flex items-start gap-2">
+            <svg className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+            </svg>
+            <div>
+              <p className="text-xs font-semibold text-blue-900 mb-1">Understanding Your Scores</p>
+              <p className="text-10px text-blue-700 leading-relaxed">
+                Quality scores measure how well OptiMIR answers your questions. <strong>Have several conversations first</strong> before evaluating for meaningful results.
+              </p>
+            </div>
+          </div>
+        </div>
 <div className="mb-4 rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
   <div className="flex items-center justify-between mb-3">
     <div>
@@ -544,10 +546,26 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
   {/* Score Grid */}
 <div className="grid grid-cols-2 gap-2">
   {[
-    { label: "Faithfulness", key: "faithfulness" as const, desc: "No hallucinations" },
-    { label: "Relevancy", key: "answer_relevancy" as const, desc: "On-topic answers" },
-    { label: "Precision", key: "context_precision" as const, desc: "Quality retrieval" },
-    { label: "Recall", key: "context_recall" as const, desc: "Complete context" }
+            { 
+              label: "Faithfulness", 
+              key: "faithfulness" as const, 
+              desc: "Answers based only on your documents"
+            },
+            { 
+              label: "Relevancy", 
+              key: "answer_relevancy" as const, 
+              desc: "Directly answers your question"
+            },
+            { 
+              label: "Precision", 
+              key: "context_precision" as const, 
+              desc: "Finds the right information"
+            },
+            { 
+              label: "Recall", 
+              key: "context_recall" as const, 
+              desc: "Finds all needed information"
+            }
   ].map((metric) => {
     const score = ragasResult?.scores?.[metric.key];
     const value = typeof score === "number" ? score : 0;
@@ -699,25 +717,8 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     {/* Main chat area */}
     <div className="flex-1 flex flex-col h-screen relative overflow-hidden">
       {/* Scrollable messages */}
-      <section className="flex-1 overflow-y-auto pb-48">
-        <div className="max-w-4xl mx-auto w-full px-8 pt-16 pb-40">
-          {/* ✅ NEW: Streaming Status Bar */}
-    {streamingStatus && (
-      <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl animate-pulse">
-        <p className="text-sm text-blue-700 font-medium">
-          {streamingStatus}
-        </p>
-      </div>
-    )}
-
-    {/* ✅ NEW: Retrieval Metrics (shown after response) */}
-    {retrievalMetrics && !isSending && retrievalMetrics.time < 500 && (
-  <div className="mb-4 p-2 bg-green-50 rounded-lg inline-block">
-    <span className="text-xs text-green-700 font-medium">
-      ⚡ Answered in {retrievalMetrics.time}ms
-    </span>
-  </div>
-)}
+        <section className="flex-1 overflow-y-auto pb-48">
+          <div className="max-w-4xl mx-auto w-full px-8 pt-16">
           {/* Greeting when empty */}
           {messages.length === 0 && (
             <header className="mb-12">
@@ -779,6 +780,15 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
                       </details>
                     )}
                 </div>
+                    {/* ✅ Response time badge - shown BELOW assistant messages */}
+                  {m.role === "assistant" && m.responseTime && (
+                    <div className="mt-2">
+                      <span className="text-xs bg-green-50 text-green-700 px-3 py-1 rounded-full font-medium">
+                        ⚡ Answered in {m.responseTime}ms
+                      </span>
+                    </div>
+                  )}
+              
               </div>
             ))}
             <div ref={messagesEndRef} />
