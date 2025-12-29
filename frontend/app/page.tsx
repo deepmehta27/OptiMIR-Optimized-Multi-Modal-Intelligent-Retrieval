@@ -95,6 +95,9 @@ export default function HomePage() {
   const [images, setImages] = useState<string[]>([]);
   const [selectedEvalModel, setSelectedEvalModel] = useState<ModelId | "all">("all");
   const [showEvalModal, setShowEvalModal] = useState(false);
+  const [streamingStatus, setStreamingStatus] = useState<string>("");
+  const [retrievalMetrics, setRetrievalMetrics] = useState<{chunks: number; time: number} | null>(null);
+
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -280,7 +283,7 @@ async function ingestImage(selectedFile: File) {
     question: userText,
     model: model,
     use_context: true,
-    history: messages.slice(-4),
+    history: messages,
   });
 
   const endpoint = "http://localhost:8000/chat/stream";
@@ -314,10 +317,34 @@ async function ingestImage(selectedFile: File) {
         if (!dataStr || dataStr === "DONE") continue;
 
         try {
-          const payload = JSON.parse(dataStr);
+        const payload = JSON.parse(dataStr);
+        
+        // ✅ Handle status updates
+        if (payload.type === "status") {
+          setStreamingStatus(payload.message);
+          // Clear status after 2 seconds
+          setTimeout(() => setStreamingStatus(""), 2000);
+        }
 
-          if (payload.type === "meta") {
-            const chunks = (payload.chunks ?? []) as SourceChunk[];
+        // ✅ Handle latency metrics
+        if (payload.type === "latency") {
+          setRetrievalMetrics({
+            chunks: 0, // Will be set from meta
+            time: payload.retrieval_ms
+          });
+        }
+
+        // ✅ Handle metadata (includes chunks/sources)
+        if (payload.type === "meta") {
+          const meta = payload.data;
+          setRetrievalMetrics({
+            chunks: meta.chunks_used || 0,
+            time: meta.retrieval_time_ms || 0
+          });
+
+          // Extract sources if available
+          const chunks = (payload.chunks ?? []) as SourceChunk[];
+          if (chunks.length > 0) {
             const sources: SourceChunk[] = chunks.map((c) => ({
               source: c.source,
               page: c.page,
@@ -334,24 +361,27 @@ async function ingestImage(selectedFile: File) {
               return copy;
             });
           }
-
-          if (payload.type === "token") {
-            assistantText += payload.token;
-            setMessages((prev) => {
-              const copy = [...prev];
-              let last = copy[copy.length - 1];
-
-              if (!last || last.role !== "assistant") {
-                last = { role: "assistant", text: "" };
-                copy.push(last);
-              }
-              last.text = assistantText;
-              return copy;
-            });
-          }
-        } catch {
-          // ignore parse errors
         }
+
+        // ✅ Handle streaming tokens
+        if (payload.type === "token") {
+          assistantText += payload.token;
+          setMessages((prev) => {
+            const copy = [...prev];
+            let last = copy[copy.length - 1];
+
+            if (!last || last.role !== "assistant") {
+              last = { role: "assistant", text: "" };
+              copy.push(last);
+            }
+            last.text = assistantText;
+            return copy;
+          });
+        }
+      } catch {
+        // ignore parse errors
+      }
+
       }
     }
   } catch (err) {
@@ -671,6 +701,23 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
       {/* Scrollable messages */}
       <section className="flex-1 overflow-y-auto pb-48">
         <div className="max-w-4xl mx-auto w-full px-8 pt-16 pb-40">
+          {/* ✅ NEW: Streaming Status Bar */}
+    {streamingStatus && (
+      <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl animate-pulse">
+        <p className="text-sm text-blue-700 font-medium">
+          {streamingStatus}
+        </p>
+      </div>
+    )}
+
+    {/* ✅ NEW: Retrieval Metrics (shown after response) */}
+    {retrievalMetrics && !isSending && retrievalMetrics.time < 500 && (
+  <div className="mb-4 p-2 bg-green-50 rounded-lg inline-block">
+    <span className="text-xs text-green-700 font-medium">
+      ⚡ Answered in {retrievalMetrics.time}ms
+    </span>
+  </div>
+)}
           {/* Greeting when empty */}
           {messages.length === 0 && (
             <header className="mb-12">
