@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState,useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -8,7 +8,16 @@ import "./globals.css";
 import "katex/dist/katex.min.css";
 import { OpenAI, Anthropic } from "@lobehub/icons";
 
-type ModelId = "gpt4o" | "gpt-nano" | "claude" | "claude-sonnet";
+type ModelId = "gpt4o-mini" | "gpt4o" | "claude-haiku" | "claude-sonnet";
+
+type Model = {
+  id: ModelId;
+  name: string;
+  provider: "OPENAI" | "ANTHROPIC";
+  tier: "Budget" | "Premium";       
+};
+
+const MAX_FILES = 10;
 
 type RagasResult = {
   status: string;
@@ -19,18 +28,37 @@ type RagasResult = {
     };
   };
 };
-
-const MODEL_OPTIONS: { id: ModelId; label: string; provider: string }[] = [
-  { id: "gpt4o", label: "GPT-4o Mini", provider: "OpenAI" },
-  { id: "gpt-nano", label: "GPT-4.1 Nano", provider: "OpenAI" },
-  { id: "claude", label: "Claude Haiku 4.5", provider: "Anthropic" },
-  { id: "claude-sonnet", label: "Claude Sonnet 4.5", provider: "Anthropic" },
+const models: Model[] = [
+  { 
+    id: "gpt4o-mini", 
+    name: "GPT-4o Mini", 
+    provider: "OPENAI",
+    tier: "Budget",
+  },
+  { 
+    id: "gpt4o", 
+    name: "GPT-4o", 
+    provider: "OPENAI",
+    tier: "Premium",
+  },
+  { 
+    id: "claude-haiku", 
+    name: "Claude Haiku 4.5", 
+    provider: "ANTHROPIC",
+    tier: "Budget",
+  },
+  { 
+    id: "claude-sonnet", 
+    name: "Claude Sonnet 4.5", 
+    provider: "ANTHROPIC",
+    tier: "Premium",
+  },
 ];
 
 const BACKEND_MODEL_MAP: Record<ModelId, "gpt4o" | "claude"> = {
-  gpt4o: "gpt4o",
-  "gpt-nano": "gpt4o",
-  claude: "claude",
+  "gpt4o-mini": "gpt4o",
+  "gpt4o": "gpt4o",
+  "claude-haiku": "claude",
   "claude-sonnet": "claude",
 };
 
@@ -51,18 +79,32 @@ const REFUSAL_TEXT =
   "I am sorry, but the provided documents do not contain information to answer this question.";
 
 export default function HomePage() {
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const [message, setMessage] = useState("");
   const [model, setModel] = useState<ModelId>("gpt4o");
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [pdfs, setPdfs] = useState<string[]>([]);
-  const currentModel = MODEL_OPTIONS.find((m) => m.id === model);
+  const currentModel = models.find((m) => m.id === model);
   const [ragasResult, setRagasResult] = useState<RagasResult | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isBatchUploading, setIsBatchUploading] = useState(false);
+  const [images, setImages] = useState<string[]>([]);
 
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+useEffect(() => {
+    if (isSending) {
+      const interval = setInterval(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 100); // Scroll every 100ms while streaming
+      
+      return () => clearInterval(interval);
+    }
+  }, [isSending]);
   async function runRagasEvalFrontend() {
   setIsEvaluating(true);
   try {
@@ -81,14 +123,18 @@ export default function HomePage() {
 }
 
   async function refreshPdfs() {
-    try {
-      const res = await fetch("http://localhost:8000/pdfs");
-      const data = await res.json();
-      setPdfs(data.sources || []);
-    } catch (e) {
-      console.error("Failed to load PDFs", e);
-    }
+  try {
+    const res = await fetch("http://localhost:8000/documents");
+    if (!res.ok) throw new Error("Failed to fetch");
+    const data = await res.json();
+    
+    // data.all contains both PDFs and images
+    setPdfs(data.pdfs || []);
+    setImages(data.images || []);
+  } catch (err) {
+    console.error(err);
   }
+}
 
   async function deletePdf(source: string) {
     try {
@@ -164,115 +210,139 @@ async function ingestImage(selectedFile: File) {
   }, []);
 
   async function sendMessage() {
-    if (!message.trim() || isSending) return;
+  if (!message.trim() && selectedFiles.length === 0) return;
+  if (isSending || isBatchUploading) return;
 
-    const userText = message.trim();
-    setMessage("");
+  const userText = message.trim();
+  
+  // Clear message immediately for better UX
+  setMessage("");
+  
+  // Add user message to chat
+  if (userText) {
     setMessages((prev) => [...prev, { role: "user", text: userText }]);
-    setIsSending(true);
+  }
 
-    const backendModel = BACKEND_MODEL_MAP[model];
+  // ✅ STEP 1: If files are attached, upload them first
+  if (selectedFiles.length > 0) {
+    const uploadSuccess = await uploadAllFiles();
+    
+    if (!uploadSuccess) {
+      // If upload failed, don't proceed with question
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: "⚠️ Some files failed to upload. Please try again or ask your question without those files.",
+        },
+      ]);
+      return;
+    }
+    
+    // Small delay to let the UI update
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
 
-    const body = JSON.stringify({
-      question: userText,
-      model: backendModel,
-      use_context: true,
-      history: messages.slice(-4),
+  // ✅ STEP 2: If user asked a question, answer it now
+  if (!userText) return; // No question asked, just uploaded files
+
+  setIsSending(true);
+
+  const backendModel = BACKEND_MODEL_MAP[model];
+  const body = JSON.stringify({
+    question: userText,
+    model: backendModel,
+    use_context: true,
+    history: messages.slice(-4),
+  });
+
+  const endpoint = "http://localhost:8000/chat/stream";
+
+  let assistantText = "";
+
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
     });
 
-    const endpoint = "http://localhost:8000/chat/stream";
+    if (!res.ok || !res.body) throw new Error("Stream error");
 
-    let assistantText = "";
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
 
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-      });
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      if (!res.ok || !res.body) {
-        throw new Error("Stream error");
-      }
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.startsWith("data:"));
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
+      for (const line of lines) {
+        const dataStr = line.slice(6).trim();
+        if (!dataStr || dataStr === "DONE") continue;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
+        try {
+          const payload = JSON.parse(dataStr);
 
-        const lines = chunk
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l.startsWith("data: "));
+          if (payload.type === "meta") {
+            const chunks = (payload.chunks ?? []) as SourceChunk[];
+            const sources: SourceChunk[] = chunks.map((c) => ({
+              source: c.source,
+              page: c.page,
+              score: c.score,
+              text: c.text,
+            }));
 
-        for (const line of lines) {
-          const dataStr = line.slice(6).trim();
-          if (!dataStr || dataStr === "[DONE]") continue;
-
-          try {
-            const payload = JSON.parse(dataStr);
-
-            if (payload.type === "meta") {
-              const chunks = (payload.chunks ?? []) as SourceChunk[];
-              const sources: SourceChunk[] = chunks.map((c: SourceChunk) => ({
-                source: c.source,
-                page: c.page,
-                score: c.score,
-                text: c.text,
-              }));
-
-              setMessages((prev) => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last && last.role === "assistant") {
-                  last.sources = sources;
-                  return copy;
-                }
-                // no assistant yet for this turn → create it
-                return [...copy, { role: "assistant", text: "", sources }];
-              });
-            }
-
-            if (payload.type === "token") {
-              assistantText += payload.token;
-
-              setMessages((prev) => {
-                const copy = [...prev];
-                let last = copy[copy.length - 1];
-
-                if (!last || last.role !== "assistant") {
-                  last = { role: "assistant", text: "" };
-                  copy.push(last);
-                }
-
-                last.text = assistantText;
-                return copy;
-              });
-            }
-          } catch {
-            // ignore parse errors
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last && last.role === "assistant") {
+                last.sources = sources;
+              }
+              return copy;
+            });
           }
+
+          if (payload.type === "token") {
+            assistantText += payload.token;
+            setMessages((prev) => {
+              const copy = [...prev];
+              let last = copy[copy.length - 1];
+
+              if (!last || last.role !== "assistant") {
+                last = { role: "assistant", text: "" };
+                copy.push(last);
+              }
+              last.text = assistantText;
+              return copy;
+            });
+          }
+        } catch {
+          // ignore parse errors
         }
       }
-    } catch (err) {
-      console.error(err);
-      setMessages((prev) => {
-        const copy = [...prev];
-        const last = copy[copy.length - 1];
-        if (last && last.role === "assistant") {
-          last.text =
-            last.text ||
-            "Something went wrong while contacting the backend. Please try again.";
-        }
-        return copy;
-      });
-    } finally {
-      setIsSending(false);
     }
+  } catch (err) {
+    console.error(err);
+    setMessages((prev) => {
+      const copy = [...prev];
+      const last = copy[copy.length - 1];
+      if (last && last.role === "assistant") {
+        last.text =
+          (last.text || "") +
+          "\n\nSomething went wrong while contacting the backend. Please try again.";
+      }
+      return copy;
+    });
+  } finally {
+    setIsSending(false);
   }
+}
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -283,7 +353,22 @@ function addFilesToQueue(files: FileList | null) {
   if (!files) return;
   
   const newFiles = Array.from(files);
-  setSelectedFiles(prev => [...prev, ...newFiles]);
+  const currentCount = selectedFiles.length;
+  const remainingSlots = MAX_FILES - currentCount;
+  
+  if (remainingSlots <= 0) {
+    alert(`Maximum ${MAX_FILES} files allowed. Please upload current batch first.`);
+    return;
+  }
+  
+  const filesToAdd = newFiles.slice(0, remainingSlots);
+  
+  if (newFiles.length > remainingSlots) {
+    alert(`Only adding ${remainingSlots} files. Maximum is ${MAX_FILES} files per upload.`);
+  }
+  
+  // ✅ Just add to queue - don't auto-upload
+  setSelectedFiles(prev => [...prev, ...filesToAdd]);
 }
 
 // Remove file from queue
@@ -292,16 +377,22 @@ function removeFileFromQueue(index: number) {
 }
 
 // Upload all queued files
-async function uploadAllFiles() {
-  if (selectedFiles.length === 0) return;
+async function uploadAllFiles(): Promise<boolean> {
+  if (selectedFiles.length === 0) return true;
   
   setIsBatchUploading(true);
+  
+  // Store files before clearing (important!)
+  const filesToUpload = [...selectedFiles];
+  
+  // ✅ Clear chips BEFORE starting upload
+  setSelectedFiles([]);
   
   setMessages((prev) => [
     ...prev,
     {
       role: "assistant",
-      text: `🔄 Processing ${selectedFiles.length} document(s)...\n\nPlease wait while we analyze and index your files.`,
+      text: `🔄 Processing ${filesToUpload.length} document(s) before answering...\n\nPlease wait...`,
     },
   ]);
   
@@ -310,7 +401,8 @@ async function uploadAllFiles() {
     failed: [] as string[],
   };
   
-  for (const file of selectedFiles) {
+  // Use filesToUpload instead of selectedFiles
+  for (const file of filesToUpload) {
     try {
       const isPdf = file.type === "application/pdf";
       if (isPdf) {
@@ -319,7 +411,7 @@ async function uploadAllFiles() {
         await ingestImage(file);
       }
       results.successful.push(file.name);
-    } catch (err: unknown) {  // Changed from 'any' to 'unknown'
+    } catch (err: unknown) {
       console.error(`Failed to upload ${file.name}:`, err);
       results.failed.push(file.name);
     }
@@ -330,14 +422,11 @@ async function uploadAllFiles() {
   // Show results
   let resultText = "";
   if (results.successful.length > 0) {
-    resultText += `✅ Successfully uploaded ${results.successful.length} document(s):\n`;
-    results.successful.forEach(name => {
-      resultText += `  • ${name}\n`;
-    });
+    resultText += `✅ ${results.successful.length} document(s) processed successfully.\n`;
   }
   
   if (results.failed.length > 0) {
-    resultText += `\n❌ Failed to upload ${results.failed.length} document(s):\n`;
+    resultText += `❌ ${results.failed.length} document(s) failed:\n`;
     results.failed.forEach(name => {
       resultText += `  • ${name}\n`;
     });
@@ -354,8 +443,9 @@ async function uploadAllFiles() {
     ];
   });
   
-  setSelectedFiles([]);
   setIsBatchUploading(false);
+  
+  return results.failed.length === 0;
 }
 
 // For PDF uploads - simplified
@@ -393,25 +483,45 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
       </div>
       
       <h2 className="text-sm font-semibold text-gray-700 mb-4 tracking-tight">
-        Documents
-      </h2>
-      
-      <div className="flex-1 overflow-y-auto">
-        {pdfs.length === 0 ? (
-          <p className="text-sm text-gray-400">No PDFs uploaded yet.</p>
-        ) : (
+  Documents
+</h2>
+
+<div className="flex-1 overflow-y-auto">
+  {pdfs.length === 0 && images.length === 0 ? (
+    <p className="text-sm text-gray-400">No documents uploaded yet.</p>
+  ) : (
+    <div className="space-y-4">
+      {/* PDFs Section */}
+      {pdfs.length > 0 && (
+        <div>
+          <p className="text-xs font-medium text-gray-500 mb-2 px-1">
+            PDFs ({pdfs.length})
+          </p>
           <ul className="space-y-2">
             {pdfs.map((src) => (
               <li
                 key={src}
                 className="group flex items-center justify-between gap-2 text-sm text-gray-800 bg-gray-50 hover:bg-gray-100 rounded-xl px-3 py-2.5 transition-colors"
               >
-                <span className="truncate" title={src}>
-                  {src}
+                <span className="flex items-center gap-2 truncate">
+                  <svg
+                    className="w-4 h-4 text-red-500 shrink-0"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                  <span className="truncate" title={src}>
+                    {src}
+                  </span>
                 </span>
                 <button
                   onClick={() => void deletePdf(src)}
-                  className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                  className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0"
                   title="Remove from index"
                 >
                   <svg
@@ -434,8 +544,67 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
               </li>
             ))}
           </ul>
-        )}
-      </div>
+        </div>
+      )}
+      
+      {/* Images Section */}
+      {images.length > 0 && (
+        <div>
+          <p className="text-xs font-medium text-gray-500 mb-2 px-1">
+            Images ({images.length})
+          </p>
+          <ul className="space-y-2">
+            {images.map((src) => (
+              <li
+                key={src}
+                className="group flex items-center justify-between gap-2 text-sm text-gray-800 bg-gray-50 hover:bg-gray-100 rounded-xl px-3 py-2.5 transition-colors"
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <svg
+                    className="w-4 h-4 text-blue-500 shrink-0"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                  <span className="truncate" title={src}>
+                    {src}
+                  </span>
+                </span>
+                <button
+                  onClick={() => void deletePdf(src)}
+                  className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                  title="Remove from index"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6l-1 14H6L5 6" />
+                    <path d="M10 11v6" />
+                    <path d="M14 11v6" />
+                    <path d="M9 6V4h6v2" />
+                  </svg>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )}
+</div>
     </aside>
 
     {/* Main chat area */}
@@ -506,6 +675,7 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
                 </div>
               </div>
             ))}
+            <div ref={messagesEndRef} />
           </div>
         </div>
       </section>
@@ -619,107 +789,71 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
             </svg>
             <span>Add Files</span>
           </label>
-
-          {/* Upload All Button - shows when files selected */}
-          {selectedFiles.length > 0 && (
-            <button
-              onClick={uploadAllFiles}
-              disabled={isBatchUploading}
-              className="flex items-center gap-2 px-4 py-1.5 rounded-xl text-[11px] font-bold bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-all"
-            >
-              {isBatchUploading ? (
-                <>
-                  <svg
-                    className="animate-spin h-3 w-3"
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    ></circle>
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    ></path>
-                  </svg>
-                  <span>Uploading...</span>
-                </>
-              ) : (
-                <>
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
-                  </svg>
-                  <span>Upload {selectedFiles.length}</span>
-                </>
-              )}
-            </button>
-          )}
         </div>
 
         <button
-          onClick={() => setShowModelPicker(true)}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-xl hover:bg-gray-50 transition-colors"
-        >
-          {currentModel?.provider === "OpenAI" ? (
-            <OpenAI size={14} />
-          ) : (
-            <Anthropic size={14} />
-          )}
-          <span className="text-[11px] font-bold text-gray-500">
-            {currentModel?.label}
-          </span>
-        </button>
+      onClick={() => setShowModelPicker(true)}
+      className="flex items-center gap-2 px-3 py-1.5 rounded-xl hover:bg-gray-50 transition-colors"
+    >
+      {currentModel?.provider === "OPENAI" ? (
+        <OpenAI size={14} />
+      ) : (
+        <Anthropic size={14} />
+      )}
+      <span className="text-[11px] font-bold text-gray-500">
+        {currentModel?.name}
+      </span>
+    </button>
       </div>
-
-      <form className="flex items-end px-5 pb-4 gap-4" onSubmit={handleSubmit}>
-        <textarea
-          rows={1}
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          placeholder="Send a message..."
-          className="flex-1 py-3 resize-none border-none outline-none text-[15px] placeholder:text-gray-400 max-h-32"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              if (message.trim() && !isSending) void sendMessage();
-            }
-          }}
-        />
-        <button
-          type="submit"
-          disabled={!message.trim() || isSending}
-          className="h-10 w-10 rounded-full bg-gray-900 text-white flex items-center justify-center disabled:bg-gray-100 disabled:text-gray-300 transition-all shrink-0"
-        >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M12 19V5M5 12l7-7 7 7" />
-          </svg>
-        </button>
-      </form>
+      <form
+  className="flex items-end px-5 pb-4 gap-4"
+  onSubmit={handleSubmit}
+>
+  <textarea
+  rows={1}
+  value={message}
+  onChange={(e) => setMessage(e.target.value)}
+  placeholder={
+    isBatchUploading 
+      ? "Processing files..." 
+      : selectedFiles.length > 0 
+        ? `Ask a question about ${selectedFiles.length} file(s)...`
+        : "Send a message..."
+  }
+  disabled={isBatchUploading}
+  className="flex-1 py-3 resize-none border-none outline-none text-[15px] placeholder:text-gray-400 max-h-32 disabled:bg-gray-50 disabled:cursor-not-allowed"
+  onKeyDown={(e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if ((message.trim() || selectedFiles.length > 0) && !isSending && !isBatchUploading) {
+        void sendMessage();
+      }
+    }
+  }}
+/>
+  <button
+  type="submit"
+  disabled={
+    (selectedFiles.length === 0 && !message.trim()) || // Disabled if BOTH empty
+    isSending || 
+    isBatchUploading
+  }
+  className="h-10 w-10 rounded-full bg-gray-900 text-white flex items-center justify-center disabled:bg-gray-100 disabled:text-gray-300 transition-all shrink-0"
+>
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="3"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M12 19V5M5 12l7-7 7 7" />
+  </svg>
+</button>
+</form>
     </div>
   </div>
 </section>
@@ -740,7 +874,7 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
             </div>
 
             <div className="p-2">
-              {MODEL_OPTIONS.map((m) => (
+              {models.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => {
@@ -752,18 +886,29 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
                   }`}
                 >
                   <div className="flex items-center gap-2">
-                    {m.provider === "OpenAI" ? (
-                      <OpenAI size={16} />
-                    ) : (
-                      <Anthropic size={16} />
-                    )}
-                    <div className="flex flex-col items-start">
-                      <span className="text-sm font-semibold">{m.label}</span>
-                      <span className="text-[10px] uppercase tracking-wider text-gray-400 font-bold">
-                        {m.provider}
-                      </span>
-                    </div>
-                  </div>
+              {m.provider === "OPENAI" ? (
+                <OpenAI size={16} />
+              ) : (
+                <Anthropic size={16} />
+              )}
+              <div className="flex flex-col items-start">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">{m.name}</span>
+              <span 
+                className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
+                  m.tier === "Budget" 
+                    ? "bg-gray-100 text-gray-700" 
+                    : "bg-black text-white"
+                }`}
+              >
+                {m.tier}
+              </span>
+            </div>
+            <span className="text-[10px] text-gray-400">
+              {m.provider}
+            </span>
+          </div>
+          </div>
                   {model === m.id && (
                     <svg
                       width="18"
