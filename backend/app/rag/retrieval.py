@@ -11,6 +11,7 @@ from .ingest import get_or_create_collection
 from .ingest import get_or_create_collection, list_uploaded_sources
 from .ragas_eval import log_rag_interaction
 from .hybrid_search import hybrid_retrieve_chunks
+import time
 
 # --- Schemas ---
 class QueryRequest(BaseModel):
@@ -516,35 +517,70 @@ async def stream_chat_answer(
 
     # ----- 3) Build prompt + send meta with chunks -----
     # Map to actual model names
+    retrieval_start = time.time()
+
+    # Yield retrieval start event
+    if use_context and not is_smalltalk:
+        yield f"data: {json.dumps({{'type': 'status', 'status': 'retrieving', 'message': '🔍 Searching documents...'}})}\n\n"
+
+    # Calculate retrieval time (retrieval already happened above in your code)
+    retrieval_time = time.time() - retrieval_start if use_context else 0
+
+    # Map to actual model names
     actual_model, provider = MODEL_MAP[model]
-    
+
     # Build prompt
     prompt = build_chat_prompt(query, chunks, use_context, history or [])
-    
-    # Metadata
-    meta = {
-        "model": actual_model,
-        "provider": provider,
-        "timestamp": time.time(),
-        "chunks_used": len(chunks) if chunks else 0,
+
+    # Enhanced metadata with retrieval info
+    meta_payload = {
+        "type": "meta",
+        "data": {
+            "model": actual_model,
+            "provider": provider,
+            "timestamp": time.time(),
+            "chunks_used": len(chunks) if chunks else 0,
+            "retrieval_time_ms": round(retrieval_time * 1000, 2),
+            "context_sources": list(set([c.source for c in chunks])) if chunks else [],
+            "query_type": "summary" if is_summary else "image" if is_standalone_image_question else "standard",
+        },
+        "chunks": [
+            {
+                "source": c.source,
+                "page": c.page,
+                "score": c.score,
+                "text": c.text,
+                "type": c.type
+            } for c in chunks
+        ] if chunks else []
     }
-    
-    yield f"data: {json.dumps({'type': 'meta', 'data': meta})}\n\n"
-    
+
+    # Send retrieval complete status
+    if use_context and chunks:
+        num_sources = len(set([c.source for c in chunks]))
+        yield f"data: {json.dumps({{'type': 'status', 'status': 'retrieved', 'message': f'✅ Found relevant info from {{num_sources}} document(s)'}})}\n\n"
+
+    # Send full metadata with chunks
+    yield f"data: {json.dumps(meta_payload)}\n\n"
+
+    # Send generating status
+    yield f"data: {json.dumps({{'type': 'status', 'status': 'generating', 'message': f'⚡ Generating with {{actual_model}}...'}})}\n\n"
+
     # Route to correct provider
-    # Route to correct provider
+    generation_start = time.time()
     answer_text = ""
+
     if provider == "claude":
         async for chunk in stream_chat_claude(prompt, model=actual_model):
             # chunk is already formatted as SSE string
             yield chunk
             
             # Extract text for logging
-            if '"type":"content"' in chunk or '"type": "content"' in chunk:
+            if '"type":"token"' in chunk or '"type": "token"' in chunk:
                 try:
                     data = json.loads(chunk.replace("data: ", "").strip())
-                    if data.get("type") == "content":
-                        answer_text += data.get("text", "")
+                    if data.get("type") == "token":
+                        answer_text += data.get("token", "")
                 except:
                     pass
     else:  # openai
@@ -553,21 +589,29 @@ async def stream_chat_answer(
             yield chunk
             
             # Extract text for logging
-            if '"type":"content"' in chunk or '"type": "content"' in chunk:
+            if '"type":"token"' in chunk or '"type": "token"' in chunk:
                 try:
                     data = json.loads(chunk.replace("data: ", "").strip())
-                    if data.get("type") == "content":
-                        answer_text += data.get("text", "")
+                    if data.get("type") == "token":
+                        answer_text += data.get("token", "")
                 except:
                     pass
 
-        log_rag_interaction(
-            question=query,
-            answer=answer_text,
-            contexts=[c.text for c in chunks],
-            model=actual_model  # ✅ Track which model answered
-        )
-    
+    # Calculate total latency
+    generation_time = time.time() - generation_start
+    total_latency = time.time() - retrieval_start
+
+    # Send latency metrics
+    yield f"data: {json.dumps({{'type': 'latency', 'total_ms': {round(total_latency * 1000, 2)}, 'retrieval_ms': {round(retrieval_time * 1000, 2)}, 'generation_ms': {round(generation_time * 1000, 2)}}})}\n\n"
+
+    # Log interaction for RAGAS
+    log_rag_interaction(
+        question=query,
+        answer=answer_text,
+        contexts=[c.text for c in chunks],
+        model=actual_model  # ✅ Track which model answered
+    )
+
     yield "data: [DONE]\n\n"
     
 # STREAMING LLM CALLS (for /query/stream)
