@@ -1,8 +1,26 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from .rag.ingest import ingest_pdf_bytes, delete_document_by_source, list_uploaded_sources, refresh_uploaded_sources_from_chroma, get_or_create_collection
-from .rag.retrieval import rag_answer, RAGResponse, QueryRequest,ChatRequest, stream_chat_answer, run_ragas_eval
+from typing import Optional
+from .rag.ingest import (
+    ingest_pdf_bytes,
+    delete_document_by_source,
+    list_uploaded_sources,
+    refresh_uploaded_sources_from_chroma,
+    get_or_create_collection,
+)
+from .rag.retrieval import (
+    rag_answer,
+    RAGResponse,
+    QueryRequest,
+    ChatRequest,
+    stream_chat_answer,
+)
+from .rag.ragas_eval import (
+    run_ragas_eval,
+    get_ragas_log_size,
+    clear_ragas_log,
+)
 from pydantic import BaseModel
 from .rag.image_ingest import process_financial_image
 from .rag.image_routes import router as image_router
@@ -80,6 +98,39 @@ async def query_rag(payload: QueryRequest):
     response = await rag_answer(payload.question, model=payload.model)
     return response
 
+@app.get("/documents")
+async def list_all_documents():
+    """Get both PDFs and images in one unified list."""
+    from .rag.ingest import get_or_create_collection
+    
+    # Get PDFs
+    pdfs = list_uploaded_sources()
+    
+    # Get images from Chroma
+    collection = get_or_create_collection()
+    try:
+        results = collection.get(include=["metadatas"])
+        
+        images = set()
+        for meta in results.get("metadatas", []):
+            if isinstance(meta, dict) and meta.get("type") == "image":
+                source = meta.get("source")
+                if source:
+                    images.add(source)
+        
+        return {
+            "pdfs": sorted(pdfs),
+            "images": sorted(list(images)),
+            "all": sorted(list(set(pdfs) | images))  # Union of both
+        }
+    except Exception as e:
+        print(f"Error fetching documents: {e}")
+        return {
+            "pdfs": sorted(pdfs),
+            "images": [],
+            "all": sorted(pdfs)
+        }
+
 @app.get("/pdfs")
 async def list_pdfs():
     return {"sources": list_uploaded_sources()}
@@ -92,10 +143,30 @@ async def delete_pdf(req: DeletePdfRequest):
     result = delete_document_by_source(req.source)
     return result
 
+# Update the evaluation endpoint
 @app.post("/evaluate/ragas")
-async def evaluate_ragas(payload: EvalRequest):
-    result = await run_ragas_eval(limit=payload.limit)
+async def evaluate_ragas(
+    limit: Optional[int] = 50,
+    model_filter: Optional[str] = None
+):
+    """Run RAGAS evaluation on logged interactions."""
+    result = await run_ragas_eval(limit=limit, model_filter=model_filter)
     return result
+
+# Add new endpoints
+@app.get("/evaluate/ragas/status")
+async def ragas_status():
+    """Check how many interactions are logged."""
+    return {
+        "logged_interactions": get_ragas_log_size(),
+        "ready_for_eval": get_ragas_log_size() > 0
+    }
+
+@app.post("/evaluate/ragas/clear")
+async def clear_ragas():
+    """Clear evaluation log."""
+    clear_ragas_log()
+    return {"status": "cleared"}
 
 @app.on_event("startup")
 async def startup_event():
