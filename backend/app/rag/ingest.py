@@ -154,8 +154,9 @@ async def ingest_pdf_bytes(file_bytes: bytes, filename: str):
     
     # 5) Continue with ingestion
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=900,
-        chunk_overlap=150,
+        chunk_size=800,
+        chunk_overlap=200,
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
     
     page_infos: List[Dict] = []
