@@ -8,7 +8,7 @@ import "./globals.css";
 import "katex/dist/katex.min.css";
 import { OpenAI, Anthropic } from "@lobehub/icons";
 
-type ModelId = "gpt4o-mini" | "gpt4o" | "claude-haiku" | "claude-sonnet";
+type ModelId = "gpt4o-mini" | "gpt-4.1" | "claude-haiku" | "claude-sonnet";
 
 type Model = {
   id: ModelId;
@@ -44,8 +44,8 @@ const models: Model[] = [
     tier: "Budget",
   },
   { 
-    id: "gpt4o", 
-    name: "GPT-4o", 
+    id: "gpt-4.1", 
+    name: "GPT-4.1", 
     provider: "OPENAI",
     tier: "Premium",
   },
@@ -84,7 +84,7 @@ const REFUSAL_TEXT =
 export default function HomePage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [message, setMessage] = useState("");
-  const [model, setModel] = useState<ModelId>("gpt4o");
+  const [model, setModel] = useState<ModelId>("gpt-4.1");
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
@@ -112,7 +112,7 @@ export default function HomePage() {
       // Map frontend model to backend model name
       const modelMap: Record<ModelId, string> = {
         "gpt4o-mini": "gpt-4o-mini",
-        "gpt4o": "gpt-4o",
+        "gpt-4.1": "gpt-4.1",
         "claude-haiku": "claude-haiku-4-5-20251001",
         "claude-sonnet": "claude-sonnet-4-5-20250929",
       };
