@@ -17,3 +17,4 @@ ragas
 datasets
 rank-bm25
 numpy
+langsmith
