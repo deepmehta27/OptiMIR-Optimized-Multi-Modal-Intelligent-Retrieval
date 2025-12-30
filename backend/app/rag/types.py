@@ -13,7 +13,7 @@ class RetrievedChunk(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"
+    model: Literal["gpt4o-mini", "gpt-4.1", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"
     use_context: bool = True
 
 class RAGResponse(BaseModel):
@@ -27,6 +27,6 @@ class ChatHistoryItem(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
-    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"
+    model: Literal["gpt4o-mini", "gpt-4.1", "claude-haiku", "claude-sonnet"] = "gpt4o-mini"
     use_context: bool = True
     history: list[ChatHistoryItem] | None = None

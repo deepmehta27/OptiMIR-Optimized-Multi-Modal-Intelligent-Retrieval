@@ -1,7 +1,7 @@
 import json
 import time
 from typing import List, Literal, AsyncGenerator
-from functools import partial
+from functools import wraps
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 import anthropic
@@ -35,7 +35,7 @@ except ImportError:
             return f
         return decorator(func) if func else decorator
 # Retrieval + Prompt
-
+@traceable(name="retrieve_chunks", run_type="retriever")
 async def retrieve_chunks(query: str, k: int = 4) -> List[RetrievedChunk]:
     """Sync Chroma query wrapped in async function for consistency."""
     collection = get_or_create_collection()
@@ -150,7 +150,7 @@ Answer:""".strip()
 # Map frontend model names to actual API model names
 MODEL_MAP = {
     "gpt4o-mini": ("gpt-4o-mini", "openai"),
-    "gpt4o": ("gpt-4o", "openai"),
+    "gpt-4.1": ("gpt-4.1", "openai"),
     "claude-haiku": ("claude-haiku-4-5-20251001", "claude"),    
     "claude-sonnet": ("claude-sonnet-4-5-20250929", "claude"),  
 }
@@ -300,7 +300,7 @@ async def answer_with_claude(prompt: str) -> str:
 
 async def rag_answer(
     query: str,
-    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini", 
+    model: Literal["gpt4o-mini", "gpt-4.1", "claude-haiku", "claude-sonnet"] = "gpt4o-mini", 
 ) -> RAGResponse:
     chunks = await retrieve_chunks(query)
     prompt = build_prompt(query, chunks)
@@ -329,6 +329,53 @@ async def rag_answer(
 
 CHEAP_CHAT_MODEL = "gpt-4o-mini" 
 
+# ✅ Add tracing wrapper for LLM streaming calls
+def trace_llm_stream(provider: str):
+    """Decorator to add LangSmith tracing to streaming LLM calls."""
+    def decorator(func):
+        if not LANGSMITH_ENABLED:
+            return func
+
+        @wraps(func)
+        async def wrapper(prompt: str, model: str = None):
+            # Start a trace manually for streaming
+            start_time = time.time()
+            full_response = []
+
+            # Stream tokens
+            async for chunk in func(prompt, model):
+                full_response.append(chunk)
+                yield chunk
+
+            # Log after streaming completes
+            try:
+                # Extract just token text from SSE format
+                response_text = ""
+                for chunk in full_response:
+                    if '"type":"token"' in chunk or '"type": "token"' in chunk:
+                        try:
+                            data = json.loads(chunk.replace("data: ", "").strip())
+                            if data.get("type") == "token":
+                                response_text += data.get("token", "")
+                        except:
+                            pass
+
+                run_tree = get_current_run_tree()
+                if run_tree:
+                    run_tree.extra = {
+                        "provider": provider,
+                        "model": model or "default",
+                        "prompt_preview": prompt[:300] if isinstance(prompt, str) else "streaming",
+                        "response_preview": response_text[:300],
+                        "response_length": len(response_text),
+                        "latency_ms": round((time.time() - start_time) * 1000, 2),
+                    }
+            except:
+                pass
+
+        return wrapper
+    return decorator
+
 async def stream_chat_openai(
     prompt: str, 
     model: str = "gpt-4o-mini"  # ✅ Accept model parameter
@@ -356,7 +403,7 @@ async def stream_chat_openai(
 
     print(f"--- [LATENCY] Chat OpenAI Total: {time.time() - start_time:.2f}s ---")
 
-
+@traceable(name="rag_pipeline", run_type="chain")
 async def stream_chat_claude(
     prompt: str, 
     model: str = "claude-haiku-4-5-20251001"  
@@ -386,7 +433,7 @@ async def stream_chat_claude(
 
 async def stream_chat_answer(
     query: str,
-    model: Literal["gpt4o-mini", "gpt4o", "claude-haiku", "claude-sonnet"] = "gpt4o-mini",
+    model: Literal["gpt4o-mini", "gpt-4.1", "claude-haiku", "claude-sonnet"] = "gpt4o-mini",
     use_context: bool = True,
     history: list[ChatHistoryItem] | None = None,
 ) -> AsyncGenerator[str, None]:
@@ -560,7 +607,23 @@ async def stream_chat_answer(
     }
     # Send full metadata with chunks
     yield f"data: {json.dumps(meta_payload)}\n\n"
-    
+    # ✅ Log pipeline metadata to LangSmith
+    if LANGSMITH_ENABLED:
+        try:
+            run_tree = get_current_run_tree()
+            if run_tree:
+                run_tree.extra = {
+                    "query": query[:200],
+                    "model": actual_model,
+                    "provider": provider,
+                    "use_context": use_context,
+                    "chunk_count": len(chunks) if chunks else 0,
+                    "sources": list(set([c.source for c in chunks])) if chunks else [],
+                    "retrieval_time_ms": round(retrieval_time * 1000, 2),
+                    "query_type": "summary" if is_summary else "image" if is_standalone_image_question else "standard",
+                }
+        except:
+            pass
     # Route to correct provider
     generation_start = time.time()
     answer_text = ""
