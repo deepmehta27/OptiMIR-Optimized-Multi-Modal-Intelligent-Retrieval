@@ -75,6 +75,7 @@ type ChatMessage = {
   text: string;
   sources?: SourceChunk[];
   responseTime?: number;
+  done?: boolean;
 };
 
 const REFUSAL_TEXT =
@@ -374,19 +375,23 @@ async function ingestImage(selectedFile: File) {
       return copy;
     });
   } finally {
-    setIsSending(false);
-    // Calculate response time and add to last assistant message
-    const endTime = Date.now();
-    const responseTime = endTime - startTime;
-    setMessages((prev) => {
-      const copy = [...prev];
-      const lastMsg = copy[copy.length - 1];
-      if (lastMsg && lastMsg.role === "assistant") {
-        lastMsg.responseTime = responseTime;
-      }
-      return copy;
-    });
-  }
+  setIsSending(false);
+
+  const endTime = Date.now();
+  const responseTime = endTime - startTime;
+
+  setMessages((prev) => {
+    const copy = [...prev];
+    const last = copy[copy.length - 1];
+
+    if (last && last.role === "assistant") {
+      last.responseTime = responseTime;
+      last.done = true; // ✅ mark completion
+    }
+    return copy;
+  });
+}
+
 }
 
   function handleSubmit(e: React.FormEvent) {
@@ -503,17 +508,18 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
  return (
   <main className="min-h-screen flex bg-white text-gray-900 font-sans">
     {/* Sidebar */}
-    <aside className="h-screen w-64 border-r border-gray-200 bg-white px-5 py-6 hidden md:flex flex-col shrink-0">
+    <aside className="h-screen w-73 border-r border-gray-200 bg-white pl-5 pr-6 py-6 hidden md:flex flex-col shrink-0">
       {/* Metrics Explanation - appears BEFORE scorecard */}
         <div className="mb-3 p-3 bg-linear-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-100">
           <div className="flex items-start gap-2">
-            <svg className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <svg className="w-3.5 h-3.5 text-blue-600 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
             </svg>
             <div>
-              <p className="text-xs font-semibold text-blue-900 mb-1">Understanding Your Scores</p>
-              <p className="text-10px text-blue-700 leading-relaxed">
-                Quality scores measure how well OptiMIR answers your questions. <strong>Have several conversations first</strong> before evaluating for meaningful results.
+              <p className="text-10px font-semibold text-blue-900 mb-1">Understanding Your Scores</p>
+              <p className="text-8px text-blue-700 leading-snug">
+                Quality scores measure how well OptiMIR answers your questions. <strong>Chat a few times first 
+         for best results.</strong>
               </p>
             </div>
           </div>
@@ -734,63 +740,65 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
           {/* Messages */}
           <div className="space-y-6">
             {messages.map((m, i) => (
-              <div
-                key={i}
-                className={`flex ${
-                  m.role === "user" ? "justify-end" : "justify-start"
-                }`}
-              >
-                <div
-                  className={`max-w-[85%] rounded-2xl px-5 py-3 text-sm leading-relaxed ${
-                    m.role === "user"
-                      ? "bg-gray-900 text-white shadow-sm"
-                      : "bg-gray-100 text-gray-800"
-                  }`}
-                >
-                  <div className="prose prose-sm max-w-none prose-p:leading-relaxed">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkMath]}
-                      rehypePlugins={[rehypeKatex]}
-                    >
-                      {m.text}
-                    </ReactMarkdown>
-                  </div>
+  <div
+    key={i}
+    className={`flex ${
+      m.role === "user" ? "justify-end" : "justify-start"
+    }`}
+  >
+    <div
+      className={`max-w-[85%] rounded-2xl px-5 py-3 text-sm leading-relaxed ${
+        m.role === "user"
+          ? "bg-gray-900 text-white shadow-sm"
+          : "bg-gray-100 text-gray-800"
+      }`}
+    >
+      {/* Message content */}
+      <div className="prose prose-sm max-w-none prose-p:leading-relaxed">
+        <ReactMarkdown
+          remarkPlugins={[remarkMath]}
+          rehypePlugins={[rehypeKatex]}
+        >
+          {m.text}
+        </ReactMarkdown>
+      </div>
 
-                  {m.role === "assistant" &&
-                    m.sources &&
-                    m.sources.length > 0 &&
-                    m.text.trim() !== REFUSAL_TEXT && (
-                      <details className="mt-3 pt-3 border-t border-gray-200/50 text-xs text-gray-500">
-                        <summary className="cursor-pointer select-none font-medium hover:text-gray-700">
-                          Sources ({m.sources.length})
-                        </summary>
-                        <ul className="mt-3 space-y-2">
-                          {m.sources.slice(0, 4).map((s, idx2) => (
-                            <li key={idx2} className="flex flex-col gap-1">
-                              <span className="font-medium text-gray-700">
-                                {s.source}
-                                {s.page ? ` — page ${s.page}` : ""}
-                              </span>
-                              <span className="line-clamp-2 text-[11px] text-gray-400">
-                                {s.text}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    )}
-                </div>
-                    {/* ✅ Response time badge - shown BELOW assistant messages */}
-                  {m.role === "assistant" && m.responseTime && (
-                    <div className="mt-2">
-                      <span className="text-xs bg-green-50 text-green-700 px-3 py-1 rounded-full font-medium">
-                        ⚡ Answered in {m.responseTime}ms
-                      </span>
-                    </div>
-                  )}
-              
-              </div>
-            ))}
+      {/* Sources */}
+      {m.role === "assistant" &&
+        m.sources &&
+        m.sources.length > 0 &&
+        m.text.trim() !== REFUSAL_TEXT && (
+          <details className="mt-3 pt-3 border-t border-gray-200/50 text-xs text-gray-500">
+            <summary className="cursor-pointer select-none font-medium hover:text-gray-700">
+              Sources ({m.sources.length})
+            </summary>
+            <ul className="mt-3 space-y-2">
+              {m.sources.slice(0, 4).map((s, idx2) => (
+                <li key={idx2} className="flex flex-col gap-1">
+                  <span className="font-medium text-gray-700">
+                    {s.source}
+                    {s.page ? ` — page ${s.page}` : ""}
+                  </span>
+                  <span className="line-clamp-2 text-[11px] text-gray-400">
+                    {s.text}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+
+      {/* Response time badge */}
+      {m.role === "assistant" && m.done && m.responseTime && (
+        <div className="mt-3 pt-3 border-t border-gray-200/50">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 text-gray-600 text-xs font-medium">
+            ⚡ Answered in {m.responseTime}ms
+          </span>
+        </div>
+      )}
+    </div>
+  </div>
+))}
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -1072,7 +1080,7 @@ function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
       {/* Content */}
       <div className="px-6 py-5">
         {/* What is RAGAS */}
-        <div className="mb-5 p-3 bg-blue-50 rounded-xl border border-blue-100">
+        <div className="mb-5 p-2.5 bg-blue-50 rounded-xl border border-blue-100">
           <div className="flex items-start gap-2">
             <svg className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd"/>
