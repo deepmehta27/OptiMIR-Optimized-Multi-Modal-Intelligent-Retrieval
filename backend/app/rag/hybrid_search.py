@@ -2,11 +2,26 @@
 Hybrid search combining semantic (vector) + keyword (BM25) retrieval.
 """
 from typing import List
+import time
 from rank_bm25 import BM25Okapi
 import numpy as np
 from .types import RetrievedChunk
 from .ingest import get_or_create_collection 
+# ✅ LangSmith Tracing Setup
+try:
+    from langsmith import traceable
+    from langsmith.run_helpers import get_current_run_tree
+    from .config import LANGCHAIN_API_KEY
 
+    LANGSMITH_ENABLED = bool(LANGCHAIN_API_KEY)
+except ImportError:
+    LANGSMITH_ENABLED = False
+    # Dummy decorator when LangSmith is not available
+    def traceable(func=None, **kwargs):
+        def decorator(f):
+            return f
+        return decorator(func) if func else decorator
+    
 class HybridRetriever:
     def __init__(self):
         self.collection = get_or_create_collection()
@@ -164,7 +179,28 @@ def get_hybrid_retriever() -> HybridRetriever:
         _hybrid_retriever = HybridRetriever()
     return _hybrid_retriever
 
+@traceable(name="hybrid_retrieve_chunks", run_type="retriever")
 async def hybrid_retrieve_chunks(query: str, k: int = 12) -> List[RetrievedChunk]:
-    """Async wrapper for hybrid search."""
+    """Async wrapper for hybrid search with LangSmith tracing."""
+    start_time = time.time()
+
     retriever = get_hybrid_retriever()
-    return retriever.hybrid_search(query, k=k, alpha=0.6)  # 60% semantic, 40% keyword
+    chunks = retriever.hybrid_search(query, k=k, alpha=0.6)  # 60% semantic, 40% keyword
+
+    # ✅ Log metadata to LangSmith
+    if LANGSMITH_ENABLED:
+        try:
+            run_tree = get_current_run_tree()
+            if run_tree and chunks:
+                run_tree.extra = {
+                    "query": query[:200],
+                    "chunk_count": len(chunks),
+                    "latency_ms": round((time.time() - start_time) * 1000, 2),
+                    "sources": list(set([c.source for c in chunks])),
+                    "search_type": "hybrid",
+                    "alpha": 0.6
+                }
+        except:
+            pass
+
+    return chunks
