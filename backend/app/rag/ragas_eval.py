@@ -48,7 +48,8 @@ def log_rag_interaction(
 
 async def run_ragas_eval(
     limit: Optional[int] = 50,
-    model_filter: Optional[str] = None  # ✅ NEW parameter
+    model_filter: Optional[str] = None,
+    judge_model: str = "gpt-4.1-nano"# ✅ NEW parameter
 ) -> Dict:
     """
     Run RAGAS evaluation on recent interactions.
@@ -86,7 +87,7 @@ async def run_ragas_eval(
     
     # Initialize LLM and embeddings for RAGAS
     llm = LangchainLLMWrapper(ChatOpenAI(
-        model="gpt-4o-mini",
+        model=judge_model,
         api_key=OPENAI_API_KEY
     ))
     
@@ -148,7 +149,9 @@ async def run_ragas_eval(
             "status": "ok",
             "count": len(samples),
             "scores": scores,
-            "interpretation": interpret_scores(scores)
+            "interpretation": interpret_scores(scores),
+            "judge_model": judge_model,
+            "evaluated_model": model_filter or "all models"
         }
     
     except Exception as e:
@@ -161,7 +164,8 @@ async def run_ragas_eval(
             "count": len(samples),
             "error": str(e),
             "message": "RAGAS evaluation failed. Check logs.",
-            "details": error_details[:500]  # First 500 chars of traceback
+            "details": error_details[:500],
+            "judge_model": judge_model
         }
 
 
@@ -218,6 +222,14 @@ def clear_ragas_log():
 def get_ragas_log_size() -> int:
     """Get number of logged interactions."""
     return len(RAGAS_LOG)
+
+def get_ragas_log_by_model() -> Dict[str, int]:
+    """Get count of logged interactions per model."""
+    model_counts = {}
+    for entry in RAGAS_LOG:
+        model = entry.get("model", "unknown")
+        model_counts[model] = model_counts.get(model, 0) + 1
+    return model_counts
 
 def _sanitize_float(value: float) -> float:
     """
