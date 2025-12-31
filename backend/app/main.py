@@ -10,12 +10,9 @@ from .rag.ingest import (
     get_or_create_collection,
 )
 from .rag.types import ( 
-    RAGResponse,
-    QueryRequest,
     ChatRequest,
 )
 from .rag.retrieval import (
-    rag_answer,
     stream_chat_answer,
 )
 from .rag.ragas_eval import (
@@ -91,15 +88,6 @@ async def chat_stream(payload: ChatRequest):
             yield chunk
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
-
-@app.post("/query", response_model=RAGResponse)
-async def query_rag(payload: QueryRequest):
-    if not payload.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
-
-    # FIX: Must await rag_answer
-    response = await rag_answer(payload.question, model=payload.model)
-    return response
 
 @app.get("/documents")
 async def list_all_documents():
