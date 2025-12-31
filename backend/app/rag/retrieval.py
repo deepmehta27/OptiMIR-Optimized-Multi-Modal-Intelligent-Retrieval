@@ -6,54 +6,37 @@ from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 import anthropic
 from .config import OPENAI_API_KEY, ANTHROPIC_API_KEY
-from .ingest import get_or_create_collection
 from .ingest import get_or_create_collection, list_uploaded_sources
 from .ragas_eval import log_rag_interaction
 from .hybrid_search import hybrid_retrieve_chunks
-import time
 from .types import (
     RetrievedChunk,
-    RAGResponse,
     ChatHistoryItem,
     ChatRequest
 )
 # ✅ LangSmith Tracing Setup
 try:
-    from langsmith import traceable
-    from langsmith.run_helpers import get_current_run_tree
+    from langsmith import traceable, Client
+    from langsmith.run_helpers import get_current_run_tree, tracing_context
+    from langsmith.wrappers import wrap_openai
     from .config import LANGCHAIN_API_KEY
 
     LANGSMITH_ENABLED = bool(LANGCHAIN_API_KEY)
     if LANGSMITH_ENABLED:
-        print("✅ LangSmith tracing enabled")
+        print("✅ LangSmith tracing enabled with token tracking")
+        langsmith_client = Client()
 except ImportError:
     LANGSMITH_ENABLED = False
     print("⚠️  langsmith not installed - tracing disabled")
+    langsmith_client = None
     # Dummy decorator when LangSmith is not available
     def traceable(func=None, **kwargs):
         def decorator(f):
             return f
         return decorator(func) if func else decorator
-# Retrieval + Prompt
+    
+# Retrieval + Prompt Building
 @traceable(name="retrieve_chunks", run_type="retriever")
-async def retrieve_chunks(query: str, k: int = 4) -> List[RetrievedChunk]:
-    """Sync Chroma query wrapped in async function for consistency."""
-    collection = get_or_create_collection()
-    results = collection.query(query_texts=[query], n_results=k)
-    chunks: List[RetrievedChunk] = []
-    for doc_id, doc, meta, dist in zip(results["ids"][0],results["documents"][0],results["metadatas"][0],results["distances"][0],
-    ):
-        chunks.append(
-            RetrievedChunk(
-                text=doc,
-                source=meta.get("source", doc_id),
-                score=float(dist),
-                type=meta.get("type"),
-                page=meta.get("page"),
-            )
-        )
-    return chunks
-
 async def retrieve_chunks(
     query: str, 
     k: int = 4,
@@ -68,6 +51,7 @@ async def retrieve_chunks(
         filter_images_only: If True, only return chunks from standalone image files (type='image')
                            Excludes PDF pages with vision summaries (type='multimodal')
     """
+    start_time = time.time()
     collection = get_or_create_collection()
     
     # Add metadata filter if needed
@@ -97,7 +81,7 @@ async def retrieve_chunks(
                 page=meta.get("page"),
             )
         )
-    # ✅ Log metadata to LangSmith
+    # Log metadata to LangSmith
     if LANGSMITH_ENABLED:
         try:
             run_tree = get_current_run_tree()
@@ -105,12 +89,13 @@ async def retrieve_chunks(
                 run_tree.extra = {
                     "query": query[:200],
                     "chunk_count": len(chunks),
+                    "latency_ms": round((time.time() - start_time) * 1000, 2),
                     "sources": list(set([c.source for c in chunks])),
                     "filter_images_only": filter_images_only
                 }
         except:
             pass
-        
+
     return chunks
 
 def build_prompt(query: str, chunks: List[RetrievedChunk]) -> str:
@@ -270,118 +255,31 @@ Answer concisely:""".strip()
 
 # NON-STREAMING LLM CALLS (for /query)
 
-async def answer_with_openai(prompt: str) -> str:
-    start_time = time.time()
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
-    resp = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=1024,
-        temperature=0.1,
-    )
-
-    print(f"--- [LATENCY] GPT-4o-mini: {time.time() - start_time:.2f}s ---")
-    return resp.choices[0].message.content or ""
-
-async def answer_with_claude(prompt: str) -> str:
-    start_time = time.time()
-    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-
-    resp = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=700,
-        temperature=0.1,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    print(f"--- [LATENCY] Claude-Haiku-4.5: {time.time() - start_time:.2f}s ---")
-    return "".join(block.text for block in resp.content if block.type == "text")
-
-async def rag_answer(
-    query: str,
-    model: Literal["gpt4o-mini", "gpt-4.1", "claude-haiku", "claude-sonnet"] = "gpt4o-mini", 
-) -> RAGResponse:
-    chunks = await retrieve_chunks(query)
-    prompt = build_prompt(query, chunks)
-
-    print(f"\n--- [LOG] Routing to: {model.upper()} ---")
-
-    if model == "claude":
-        answer = await answer_with_claude(prompt)
-        model_name = "claude-haiku-4.5"
-    else:
-        answer = await answer_with_openai(prompt)
-        model_name = "gpt-4o-mini"
-
-    print(f"--- [LOG] Answer generated by: {model_name} ---\n")
-    
-    # NEW: Use the centralized logging function
-    log_rag_interaction(
-        question=query,
-        answer=answer,
-        contexts=[c.text for c in chunks]
-    )
-
-    return RAGResponse(answer=answer, model=model_name, chunks=chunks)
+# ✅ Token tracking helper
+def count_tokens_approximate(text: str) -> int:
+    """Approximate token count (1 token ≈ 4 chars for English)."""
+    return len(text) // 4
 
 # STREAMING LLM CALLS (for /query/stream)
 
 CHEAP_CHAT_MODEL = "gpt-4o-mini" 
 
-# ✅ Add tracing wrapper for LLM streaming calls
-def trace_llm_stream(provider: str):
-    """Decorator to add LangSmith tracing to streaming LLM calls."""
-    def decorator(func):
-        if not LANGSMITH_ENABLED:
-            return func
-
-        @wraps(func)
-        async def wrapper(prompt: str, model: str = None):
-            # Start a trace manually for streaming
-            start_time = time.time()
-            full_response = []
-
-            # Stream tokens
-            async for chunk in func(prompt, model):
-                full_response.append(chunk)
-                yield chunk
-
-            # Log after streaming completes
-            try:
-                # Extract just token text from SSE format
-                response_text = ""
-                for chunk in full_response:
-                    if '"type":"token"' in chunk or '"type": "token"' in chunk:
-                        try:
-                            data = json.loads(chunk.replace("data: ", "").strip())
-                            if data.get("type") == "token":
-                                response_text += data.get("token", "")
-                        except:
-                            pass
-
-                run_tree = get_current_run_tree()
-                if run_tree:
-                    run_tree.extra = {
-                        "provider": provider,
-                        "model": model or "default",
-                        "prompt_preview": prompt[:300] if isinstance(prompt, str) else "streaming",
-                        "response_preview": response_text[:300],
-                        "response_length": len(response_text),
-                        "latency_ms": round((time.time() - start_time) * 1000, 2),
-                    }
-            except:
-                pass
-
-        return wrapper
-    return decorator
-
 async def stream_chat_openai(
     prompt: str, 
-    model: str = "gpt-4o-mini"  # ✅ Accept model parameter
+    model: str = "gpt-4o-mini",
+    parent_run_id: str = None  # ✅ NEW: For nesting
 ) -> AsyncGenerator[str, None]:
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    """Stream response from OpenAI with token tracking."""
+    
+    # ✅ Wrap client for auto-tracing
+    if LANGSMITH_ENABLED:
+        client = wrap_openai(AsyncOpenAI(api_key=OPENAI_API_KEY))
+    else:
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    
     start_time = time.time()
+    first_token_time = None
+    response_text = ""  # ✅ Track full response
 
     stream = await client.chat.completions.create(
         model=model,
@@ -396,21 +294,56 @@ async def stream_chat_openai(
         token = chunk.choices[0].delta.content or ""
         if not token:
             continue
+        
         if first_token:
-            print(f"--- [TTFT] Chat OpenAI: {time.time() - start_time:.2f}s ---")
+            first_token_time = time.time() - start_time
+            print(f"--- [TTFT] Chat OpenAI ({model}): {first_token_time:.2f}s ---")
             first_token = False
+        
+        response_text += token  # ✅ Collect response
         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-    print(f"--- [LATENCY] Chat OpenAI Total: {time.time() - start_time:.2f}s ---")
+    total_time = time.time() - start_time
+    print(f"--- [LATENCY] Chat OpenAI ({model}) Total: {total_time:.2f}s ---")
+    
+    # ✅ Log to LangSmith with token counts
+    if LANGSMITH_ENABLED and langsmith_client:
+        try:
+            input_tokens = count_tokens_approximate(prompt)
+            output_tokens = count_tokens_approximate(response_text)
+            
+            langsmith_client.create_run(
+                name=f"chat_openai_{model}",
+                run_type="llm",
+                inputs={"prompt": prompt[:500]},
+                outputs={"response": response_text[:500]},
+                start_time=start_time,
+                end_time=time.time(),
+                extra={
+                    "model": model,
+                    "provider": "openai",
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "ttft_ms": round(first_token_time * 1000, 2) if first_token_time else None,
+                    "latency_ms": round(total_time * 1000, 2),
+                },
+                parent_run_id=parent_run_id  # ✅ Nest under parent
+            )
+        except Exception as e:
+            print(f"[LANGSMITH] Failed to log OpenAI run: {e}")
 
-@traceable(name="rag_pipeline", run_type="chain")
 async def stream_chat_claude(
     prompt: str, 
-    model: str = "claude-haiku-4-5-20251001"  
+    model: str = "claude-haiku-4-5-20251001",
+    parent_run_id: str = None  # ✅ NEW: For nesting
 ) -> AsyncGenerator[str, None]:
-    """Stream response from Claude."""
+    """Stream response from Claude with token tracking."""
+    
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     start_time = time.time()
+    first_token_time = None
+    response_text = ""  # ✅ Track full response
     first_token = True
 
     async with client.messages.stream(
@@ -424,13 +357,46 @@ async def stream_chat_claude(
                 token = event.delta.text
                 if not token:
                     continue
+                
                 if first_token:
-                    print(f"--- [TTFT] Chat Claude: {time.time() - start_time:.2f}s ---")
+                    first_token_time = time.time() - start_time
+                    print(f"--- [TTFT] Chat Claude ({model}): {first_token_time:.2f}s ---")
                     first_token = False
+                
+                response_text += token  # ✅ Collect response
                 yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-    print(f"--- [LATENCY] Chat Claude Total: {time.time() - start_time:.2f}s ---")
-
+    total_time = time.time() - start_time
+    print(f"--- [LATENCY] Chat Claude ({model}) Total: {total_time:.2f}s ---")
+    
+    # ✅ Log to LangSmith with token counts
+    if LANGSMITH_ENABLED and langsmith_client:
+        try:
+            input_tokens = count_tokens_approximate(prompt)
+            output_tokens = count_tokens_approximate(response_text)
+            
+            langsmith_client.create_run(
+                name=f"chat_claude_{model}",
+                run_type="llm",
+                inputs={"prompt": prompt[:500]},
+                outputs={"response": response_text[:500]},
+                start_time=start_time,
+                end_time=time.time(),
+                extra={
+                    "model": model,
+                    "provider": "anthropic",
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "ttft_ms": round(first_token_time * 1000, 2) if first_token_time else None,
+                    "latency_ms": round(total_time * 1000, 2),
+                },
+                parent_run_id=parent_run_id  # ✅ Nest under parent
+            )
+        except Exception as e:
+            print(f"[LANGSMITH] Failed to log Claude run: {e}")
+            
+@traceable(name="rag_pipeline", run_type="chain")
 async def stream_chat_answer(
     query: str,
     model: Literal["gpt4o-mini", "gpt-4.1", "claude-haiku", "claude-sonnet"] = "gpt4o-mini",
@@ -440,7 +406,16 @@ async def stream_chat_answer(
     if history is None:
         history = []
     chunks: List[RetrievedChunk] | None = None
-
+    
+    parent_run_id = None
+    if LANGSMITH_ENABLED:
+        try:
+            run_tree = get_current_run_tree()
+            if run_tree:
+                parent_run_id = str(run_tree.id)
+        except:
+            pass
+        
     lower_q = query.lower()
 
     smalltalk_triggers = ["hi", "hello", "hey", "how are you", "good morning", "good evening"]
@@ -624,16 +599,14 @@ async def stream_chat_answer(
                 }
         except:
             pass
-    # Route to correct provider
+   # Route to correct provider
     generation_start = time.time()
     answer_text = ""
 
     if provider == "claude":
-        async for chunk in stream_chat_claude(prompt, model=actual_model):
-            # chunk is already formatted as SSE string
+        async for chunk in stream_chat_claude(prompt, model=actual_model, parent_run_id=parent_run_id):  # ✅ Added
             yield chunk
             
-            # Extract text for logging
             if '"type":"token"' in chunk or '"type": "token"' in chunk:
                 try:
                     data = json.loads(chunk.replace("data: ", "").strip())
@@ -642,11 +615,9 @@ async def stream_chat_answer(
                 except:
                     pass
     else:  # openai
-        async for chunk in stream_chat_openai(prompt, model=actual_model):
-            # chunk is already formatted as SSE string
+        async for chunk in stream_chat_openai(prompt, model=actual_model, parent_run_id=parent_run_id):  # ✅ Added
             yield chunk
             
-            # Extract text for logging
             if '"type":"token"' in chunk or '"type": "token"' in chunk:
                 try:
                     data = json.loads(chunk.replace("data: ", "").strip())
@@ -669,69 +640,3 @@ async def stream_chat_answer(
 
     yield "data: [DONE]\n\n"
     
-# STREAMING LLM CALLS (for /query/stream)
-
-async def stream_openai(prompt: str) -> AsyncGenerator[str, None]:
-    """Yield SSE events with tokens from GPT-4o-mini."""
-    start_time = time.time()
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
-    stream = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=700,
-        temperature=0.1,
-        stream=True,
-    )
-
-    first_token = True
-    full_answer: List[str] = []
-
-    async for chunk in stream:
-        delta = chunk.choices[0].delta
-        token = delta.content or ""
-        if not token:
-            continue
-
-        full_answer.append(token)
-
-        if first_token:
-            print(f"--- [TTFT] OpenAI: {time.time() - start_time:.2f}s ---")
-            first_token = False
-
-        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-
-    print(f"--- [LATENCY] OpenAI Stream Total: {time.time() - start_time:.2f}s ---")
-    # full answer available as "".join(full_answer) if needed
-
-
-async def stream_claude(prompt: str) -> AsyncGenerator[str, None]:
-    """Yield SSE events with tokens from Claude Haiku 4.5."""
-    start_time = time.time()
-    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-
-    first_token = True
-    full_answer: List[str] = []
-
-    async with client.messages.stream(
-        model="claude-haiku-4-5",
-        max_tokens=1024,
-        temperature=0.1,
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        async for event in stream:
-            if event.type == "content_block_delta" and event.delta.type == "text_delta":
-                token = event.delta.text
-                if not token:
-                    continue
-
-                full_answer.append(token)
-
-                if first_token:
-                    print(f"--- [TTFT] Claude: {time.time() - start_time:.2f}s ---")
-                    first_token = False
-
-                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-
-    print(f"--- [LATENCY] Claude Stream Total: {time.time() - start_time:.2f}s ---")
-    # full answer available as "".join(full_answer) if needed
