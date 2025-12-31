@@ -6,7 +6,6 @@ Provides decorators and helpers for tracing RAG pipeline components.
 from functools import wraps
 from typing import Any, Callable
 import time
-
 from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 
@@ -125,7 +124,7 @@ def trace_rag_pipeline(func: Callable) -> Callable:
 
         # Extract query and model
         query = kwargs.get('query', args[0] if args else 'unknown')
-        model = kwargs.get('model', 'gpt4o-mini')
+        model = kwargs.get('model', 'gpt-4.1-nano')
         use_context = kwargs.get('use_context', True)
 
         # Call the pipeline
