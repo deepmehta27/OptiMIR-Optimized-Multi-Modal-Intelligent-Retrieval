@@ -183,8 +183,7 @@ Before running `apply`, ensure all required cloud provider credentials and secre
 
 ## ✉️ Contact
 
-Developed by Deep Mehta — AI Engineering & RAG Systems
+Made with ❤️ by Deep Mehta
 For questions, feedback, or collaboration, please open an issue or reach out via GitHub.
 
-````
 
