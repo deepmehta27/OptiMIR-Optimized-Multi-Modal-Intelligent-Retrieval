@@ -369,7 +369,10 @@ async def stream_chat_claude(
     total_time = time.time() - start_time
     print(f"--- [LATENCY] Chat Claude ({model}) Total: {total_time:.2f}s ---")
     
-    # ✅ Log to LangSmith with token counts
+    total_time = time.time() - start_time
+    print(f"--- [LATENCY] Chat Claude ({model}) Total: {total_time:.2f}s ---")
+    
+    # ✅ Log to LangSmith with METADATA (not just extra)
     if LANGSMITH_ENABLED and langsmith_client:
         try:
             input_tokens = count_tokens_approximate(prompt)
@@ -388,10 +391,15 @@ async def stream_chat_claude(
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "total_tokens": input_tokens + output_tokens,
+                },
+                tags=["claude", model, "streaming"],  
+                metadata={  
+                    "ttft_seconds": round(first_token_time, 3) if first_token_time else None,
+                    "latency_seconds": round(total_time, 3),
                     "ttft_ms": round(first_token_time * 1000, 2) if first_token_time else None,
                     "latency_ms": round(total_time * 1000, 2),
                 },
-                parent_run_id=parent_run_id  # ✅ Nest under parent
+                parent_run_id=parent_run_id
             )
         except Exception as e:
             print(f"[LANGSMITH] Failed to log Claude run: {e}")
