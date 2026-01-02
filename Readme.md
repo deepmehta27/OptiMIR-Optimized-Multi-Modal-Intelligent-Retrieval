@@ -104,8 +104,7 @@ User Upload → Classification → Ingestion
    ```bash
    git clone https://github.com/deepmehta27/OptiMIR-Optimized-Multi-Modal-Intelligent-Retrieval.git
    cd backend
-````
-
+   
 2. **Set up a Python environment**
 
    ```bash
@@ -182,14 +181,6 @@ Before running `apply`, ensure all required cloud provider credentials and secre
 └── README.md
 ```
 
----
-
-## 📜 License
-
-This project is licensed under the **MIT License**. See [LICENSE](./LICENSE) for details.
-
----
-
 ## ✉️ Contact
 
 Developed by Deep Mehta — AI Engineering & RAG Systems
@@ -197,43 +188,3 @@ For questions, feedback, or collaboration, please open an issue or reach out via
 
 ````
 
----
-
-## 📌 Notes on Git & Terraform
-
-✅ Commit all `.tf` files (`main.tf`, `providers.tf`, `variables.tf`, `versions.tf`, `outputs.tf`)  
-❌ Do **not** commit `terraform.tfstate`, `terraform.tfstate.backup`, or the `.terraform/` directory  
-❌ Do **not** commit secrets or `*.tfvars` with real credentials
-
-Suggested `.gitignore`:
-
-```gitignore
-# Terraform
-.terraform/
-terraform.tfstate
-terraform.tfstate.backup
-*.tfvars
-
-# Env files
-.env
-.env.local
-.env.*.local
-
-# Python
-__pycache__/
-*.pyc
-venv/
-
-# LangSmith logs
-langsmith.log*
-````
-
----
-
-If you want, I can also generate:
-
-✅ A **`.tfvars.example` template**
-✅ A **badges section** for your README
-✅ A **LinkedIn/portfolio snippet** version of this description
-
-Just let me know!
