@@ -1,0 +1,43 @@
+# ===============================
+# GCP Project Configuration
+# ===============================
+
+# GCP project ID
+project_id = "your-gcp-project-id"
+
+# GCP region for Cloud Run and Artifact Registry
+region = "us-central1"
+
+# Name of the Cloud Run service
+service_name = "optimir-api"
+
+
+# ===============================
+# Artifact Registry
+# ===============================
+
+# Artifact Registry repository ID (Docker)
+artifact_repo_id = "optimir"
+
+# Full Docker image path (update project ID accordingly)
+image = "us-central1-docker.pkg.dev/your-gcp-project-id/optimir/optimir-api:latest"
+
+
+# ===============================
+# Access Control
+# ===============================
+
+# Email allowed to invoke the private Cloud Run service
+invoker_user_email = "your-email@gmail.com"
+
+
+# ===============================
+# Secrets
+# ===============================
+
+# Secret names expected to exist in Secret Manager
+# (values are injected at runtime, not stored in Terraform)
+secrets = [
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+]

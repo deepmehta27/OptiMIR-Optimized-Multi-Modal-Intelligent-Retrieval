@@ -1,0 +1,16 @@
+# Terraform local state files
+terraform.tfstate
+terraform.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Terraform variable overrides
+*.tfvars
+
+# Local credentials
+.env
+.env.local
+.env.*.local
+
+# LangSmith internal logs, if any
+langsmith.log
